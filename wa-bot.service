@@ -1,0 +1,18 @@
+[Unit]
+Description=Bot WhatsApp Buku Kas D'Cell
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Ganti "ubuntu" di bawah ini kalau nama user VM Anda beda
+User=ubuntu
+WorkingDirectory=/home/ubuntu/wa-bot
+ExecStart=/usr/bin/node index.js
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/ubuntu/wa-bot/bot.log
+StandardError=append:/home/ubuntu/wa-bot/bot.log
+
+[Install]
+WantedBy=multi-user.target

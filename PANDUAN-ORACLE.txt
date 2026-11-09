@@ -1,0 +1,179 @@
+PANDUAN: BOT WHATSAPP UNTUK BUKU KAS D'CELL (via Oracle Cloud, GRATIS SELAMANYA)
+================================================================================
+
+APA BEDANYA DENGAN TERMUX?
+---------------------------
+Sama persis botnya (file index.js, waParser.js, dll di folder ini juga
+dipakai). Bedanya cuma TEMPAT bot ini dijalankan:
+- Termux  = jalan di HP Android bekas Anda sendiri, harus nyala & nge-charge
+            terus, kalau mati bot ikut mati.
+- Oracle  = jalan di server komputer gratis milik Oracle di internet,
+            nyala 24 jam terus tanpa perlu HP menyala, GRATIS SELAMANYA
+            (bukan trial/uji coba) selama dipakai wajar.
+
+Pilih Oracle kalau tidak mau repot soal HP yang harus nyala terus. Pilih
+Termux kalau tidak nyaman memakai kartu kredit untuk verifikasi (lihat
+catatan di bawah).
+
+CATATAN PENTING SEBELUM MULAI
+------------------------------
+- Oracle MEWAJIBKAN kartu kredit/debit untuk verifikasi identitas saat
+  daftar akun gratis. Kartu TIDAK akan ditagih selama Anda tetap memakai
+  jatah gratis ("Always Free"), tapi kalau tidak punya kartu yang bisa
+  dipakai untuk ini, pakai panduan Termux saja.
+- Prosesnya lebih teknis dibanding Termux (pakai terminal/SSH dari
+  komputer, bukan dari HP). Kalau belum pernah pakai terminal sama sekali,
+  Termux kemungkinan lebih mudah diikuti sendiri.
+
+YANG ANDA BUTUHKAN
+--------------------
+1. Alamat email (untuk daftar akun Oracle Cloud).
+2. Kartu kredit/debit (hanya untuk verifikasi, tidak ditagih selama pakai
+   paket gratis).
+3. Komputer (Windows/Mac/Linux) untuk mengatur server lewat terminal.
+4. File "serviceAccountKey.json" dari Firebase (caranya sama seperti di
+   panduan Termux, LANGKAH 3).
+
+LANGKAH 1 - DAFTAR AKUN ORACLE CLOUD GRATIS
+----------------------------------------------
+1. Buka https://www.oracle.com/cloud/free/ lalu klik "Start for free".
+2. Isi email, negara (Indonesia), lalu ikuti proses verifikasi (termasuk
+   verifikasi kartu). Pilih region yang dekat, misalnya Singapore.
+3. Setelah akun jadi, masuk ke OCI Console (dashboard Oracle Cloud).
+
+LANGKAH 2 - BUAT SERVER GRATIS (VM INSTANCE)
+------------------------------------------------
+1. Di menu kiri OCI Console: Compute > Instances > Create instance.
+2. Beri nama bebas, misal "wa-bot-kas-dcell".
+3. Di bagian "Image and shape":
+   - Image: pilih "Canonical Ubuntu" (versi 22.04 atau yang terbaru).
+   - Shape: klik "Change shape", pilih tab "Ampere" (ARM), pilih
+     "VM.Standard.A1.Flex", atur 1 OCPU dan 6 GB memory (ini jatah gratis,
+     jangan lebih supaya tidak kena biaya). Kalau Ampere penuh/tidak ada
+     slot, boleh pakai "VM.Standard.E2.1.Micro" (x86, juga gratis) sebagai
+     cadangan, meski lebih kecil.
+4. Di bagian "Add SSH keys": pilih "Generate a key pair for me", lalu klik
+   "Save private key" -- simpan file yang terunduh (biasanya bernama
+   ssh-key-....key) di komputer Anda, JANGAN hilang, ini kunci masuk ke
+   server nanti.
+5. Biarkan pengaturan lain default, klik "Create". Tunggu beberapa menit
+   sampai statusnya "Running".
+6. Catat "Public IP address" instance ini (terlihat di halaman detail
+   instance setelah running).
+
+LANGKAH 3 - BUKA AKSES SSH (supaya bisa dikendalikan dari komputer)
+------------------------------------------------------------------
+Biasanya port SSH (22) sudah otomatis terbuka. Kalau nanti langkah 4 gagal
+konek, cek: Instance > klik nama VCN-nya > Security Lists > Default
+Security List > pastikan ada aturan Ingress untuk port 22 dari 0.0.0.0/0.
+
+LANGKAH 4 - MASUK KE SERVER DARI KOMPUTER (SSH)
+------------------------------------------------
+Di komputer Windows (pakai PowerPoint/Terminal) atau Mac/Linux (Terminal),
+jalankan (ganti path kunci dan IP sesuai milik Anda):
+
+  Mac/Linux:
+    chmod 400 /lokasi/ssh-key-xxxx.key
+    ssh -i /lokasi/ssh-key-xxxx.key ubuntu@ALAMAT_IP_SERVER
+
+  Windows (pakai PowerShell/Windows Terminal, Windows 10/11 sudah ada ssh):
+    ssh -i C:\lokasi\ssh-key-xxxx.key ubuntu@ALAMAT_IP_SERVER
+
+Kalau muncul pertanyaan "Are you sure you want to continue connecting?"
+ketik "yes" lalu Enter. Kalau berhasil, prompt terminal akan berubah jadi
+seperti "ubuntu@wa-bot-kas-dcell:~$".
+
+LANGKAH 5 - PASANG NODE.JS DI SERVER
+----------------------------------------
+Di dalam sesi SSH yang sudah terhubung, ketik satu-satu:
+  sudo apt update -y
+  sudo apt install -y nodejs npm unzip
+
+Cek sudah terpasang:
+  node -v
+
+LANGKAH 6 - KIRIM FILE BOT KE SERVER
+-----------------------------------------
+Dari KOMPUTER ANDA (bukan di dalam sesi SSH -- buka jendela terminal baru
+di komputer, folder tempat zip bot berada), jalankan (ganti path dan IP):
+
+  Mac/Linux:
+    scp -i /lokasi/ssh-key-xxxx.key wa-bot-kas-dcell.zip ubuntu@ALAMAT_IP_SERVER:~/
+
+  Windows:
+    scp -i C:\lokasi\ssh-key-xxxx.key wa-bot-kas-dcell.zip ubuntu@ALAMAT_IP_SERVER:~/
+
+Lalu kembali ke jendela SSH yang sudah konek ke server, ketik:
+  unzip wa-bot-kas-dcell.zip
+  mv wabot wa-bot
+  cd wa-bot
+  npm install
+
+LANGKAH 7 - KIRIM KUNCI FIREBASE KE SERVER
+-----------------------------------------------
+Ambil file serviceAccountKey.json seperti di LANGKAH 3 panduan Termux.
+Dari komputer Anda (jendela terminal biasa, bukan sesi SSH):
+
+  scp -i /lokasi/ssh-key-xxxx.key serviceAccountKey.json ubuntu@ALAMAT_IP_SERVER:~/wa-bot/
+
+LANGKAH 8 - JALANKAN BOT & SCAN QR
+----------------------------------------
+Di jendela SSH (di dalam folder ~/wa-bot):
+  node index.js
+
+Akan muncul kode QR di layar terminal. Di HP yang mau dipakai sebagai
+nomor bot (sebaiknya nomor kedua, bukan nomor utama toko): buka WhatsApp >
+Setelan > Perangkat tertaut > Tautkan perangkat > scan QR tadi.
+
+Tunggu sampai muncul "Tersambung ke WhatsApp. Bot siap mencatat transaksi."
+Coba kirim "tarik tunai 100rb bri admin 5000" ke chat mana saja (bukan
+grup) dari nomor itu untuk tes.
+
+Setelah yakin berhasil, tekan Ctrl+C untuk hentikan dulu (supaya lanjut ke
+langkah 9, biar bot jalan otomatis terus-menerus tanpa jendela SSH perlu
+dibuka selamanya).
+
+LANGKAH 9 - SUPAYA BOT JALAN TERUS (24 JAM, OTOMATIS NYALA LAGI)
+---------------------------------------------------------------------
+File "wa-bot.service" sudah disiapkan di folder ini. Di jendela SSH:
+
+  sudo cp ~/wa-bot/wa-bot.service /etc/systemd/system/wa-bot.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable wa-bot
+  sudo systemctl start wa-bot
+
+Cek statusnya:
+  sudo systemctl status wa-bot
+
+Kalau tulisannya hijau "active (running)", bot sudah jalan otomatis di
+latar belakang, dan akan otomatis nyala lagi sendiri kalau server di-
+restart atau bot sempat crash. Anda boleh menutup jendela SSH, bot tetap
+jalan di server.
+
+Untuk melihat catatan aktivitas bot kapan saja:
+  tail -f ~/wa-bot/bot.log
+(tekan Ctrl+C untuk berhenti melihat, bot tetap jalan)
+
+KALAU PERLU GANTI NOMOR ATAU BERMASALAH
+-------------------------------------------
+- Kalau WhatsApp keluar sendiri / mau ganti nomor:
+    sudo systemctl stop wa-bot
+    rm -rf ~/wa-bot/session
+    cd ~/wa-bot && node index.js      (scan QR baru, lalu Ctrl+C)
+    sudo systemctl start wa-bot
+- Lihat error terbaru: tail -n 50 ~/wa-bot/bot.log
+- Restart bot: sudo systemctl restart wa-bot
+
+BATASAN YANG PERLU DIKETAHUI
+---------------------------------
+- Server gratis Oracle ("Always Free") tetap gratis selama dipakai dalam
+  batas wajar (1 instance kecil seperti ini jauh di bawah batas), tapi
+  tetap perhatikan tagihan di dashboard Oracle sesekali untuk memastikan.
+- Jaga file serviceAccountKey.json dan ssh-key-xxxx.key baik-baik, JANGAN
+  dibagikan ke siapa pun -- keduanya bisa dipakai untuk mengubah data
+  Buku Kas dan masuk ke server Anda.
+- Bot hanya memproses pesan yang ANDA KIRIM SENDIRI (bukan pesan masuk),
+  di chat langsung (bukan grup) -- sama seperti versi Termux.
+- Kalau nanti Anda juga impor manual chat .txt lewat aplikasi sebagai
+  cadangan, ada kemungkinan kecil transaksi tercatat dua kali -- sesekali
+  periksa Riwayat.

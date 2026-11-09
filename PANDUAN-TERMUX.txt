@@ -1,0 +1,187 @@
+PANDUAN: BOT WHATSAPP UNTUK BUKU KAS D'CELL (via Termux)
+==========================================================
+
+APA INI
+-------
+Bot ini membaca pesan WhatsApp yang ANDA KETIK SENDIRI (bukan pesan dari
+pelanggan) di HP tertentu, lalu otomatis mencatatnya ke Buku Kas D'Cell.
+Caranya sama seperti fitur "Tempel pesan WhatsApp" yang sudah ada di
+aplikasi, hanya saja sekarang tidak perlu salin-tempel manual: cukup
+ketik pesan transaksi ke chat mana saja (bukan grup) dari HP bot, dan
+bot akan membalas konfirmasi di chat yang sama.
+
+Contoh pesan yang bisa dibaca bot (ketik persis seperti kalau memakai
+kolom impor WA di aplikasi):
+  tarik tunai 500rb bri admin 5000
+  transfer 1jt bri bca 1234567890 ani
+  topup 100rb dana 081234567890 bri
+  bayar 235rb dana admin 2500 listrik pln
+  keluar 50rb beli galon
+  pindah 500rb bri dana
+
+Selain mencatat transaksi, bot juga bisa membalas ringkasan kalau Anda
+ketik salah satu perintah ini (tanpa perlu format khusus):
+  saldo               -> rincian saldo tiap bank/e-wallet + uang tunai laci
+  cek saldo           -> sama seperti di atas
+  transaksi hari ini  -> jumlah transaksi, pemasukan, pengeluaran, dan laba hari ini
+  cek transaksi       -> sama seperti di atas
+
+Pesan biasa (bukan transaksi) akan diabaikan begitu saja, jadi aman
+dipakai di HP yang juga dipakai chat biasa -- TAPI karena bot hanya
+memproses pesan yang ANDA kirim sendiri (bukan dari lawan bicara),
+sebaiknya tetap pakai nomor WhatsApp kedua yang khusus untuk bot ini,
+supaya tidak bercampur dengan chat pribadi dan lebih aman kalau
+sewaktu-waktu diblokir WhatsApp karena dianggap bot.
+
+YANG ANDA BUTUHKAN
+-------------------
+1. HP Android bekas yang bisa menyala dan terhubung internet terus-menerus.
+2. Nomor WhatsApp kedua (SIM card atau nomor virtual), khusus untuk bot.
+3. File "serviceAccountKey.json" dari Firebase (langkah 3 di bawah).
+
+LANGKAH 1 - PASANG TERMUX
+---------------------------
+1. Jangan pasang Termux dari Play Store (versinya sudah tidak diperbarui).
+   Unduh dari F-Droid: buka https://f-droid.org/packages/com.termux/
+   di HP bot, lalu pasang APK-nya.
+2. Buka Termux, biarkan proses awal selesai.
+3. Ketik perintah ini satu per satu, tekan Enter setelah tiap baris:
+     pkg update -y && pkg upgrade -y
+     pkg install -y nodejs git
+
+LANGKAH 2 - SALIN BERKAS BOT KE HP
+------------------------------------
+1. Salin folder "wa-bot" (zip ini) ke penyimpanan HP, misalnya ke folder
+   Download, lalu ekstrak.
+2. Di Termux, berikan izin membaca penyimpanan:
+     termux-setup-storage
+   (akan muncul izin di Android, tekan Izinkan)
+3. Pindahkan folder wa-bot ke dalam Termux, contoh:
+     cp -r /sdcard/Download/wa-bot ~/wa-bot
+     cd ~/wa-bot
+4. Pasang semua yang dibutuhkan:
+     npm install
+   Proses ini makan waktu beberapa menit. Kalau muncul peringatan
+   (warning) tentang "sharp" atau paket opsional lain, itu tidak masalah,
+   bukan kesalahan -- bot tidak memakainya untuk membaca teks.
+
+LANGKAH 3 - AMBIL KUNCI FIREBASE
+------------------------------------
+1. Buka https://console.firebase.google.com di komputer atau HP lain,
+   masuk ke project "d-cell-16fbe".
+2. Klik ikon gerigi (Project settings) di pojok kiri atas, pilih tab
+   "Service accounts".
+3. Klik tombol "Generate new private key", lalu "Generate key".
+   Sebuah file .json akan terunduh -- JANGAN dibagikan ke siapa pun,
+   file ini bisa membaca dan mengubah semua data Buku Kas.
+4. Kirim file itu ke HP bot (lewat kabel, email ke diri sendiri, atau
+   Google Drive), lalu pindahkan dan ganti namanya persis menjadi:
+     serviceAccountKey.json
+   dan taruh di dalam folder ~/wa-bot (sejajar dengan index.js).
+   Contoh perintah di Termux kalau filenya ada di folder Download:
+     cp /sdcard/Download/d-cell-16fbe-*.json ~/wa-bot/serviceAccountKey.json
+
+LANGKAH 4 - JALANKAN BOT
+----------------------------
+1. Di Termux, dari dalam folder wa-bot, jalankan:
+     node index.js
+2. Akan muncul kode QR di layar Termux.
+3. Di HP yang mau dipakai sebagai bot (boleh HP yang sama), buka
+   WhatsApp > Setelan > Perangkat tertaut > Tautkan perangkat, lalu
+   scan QR tadi.
+4. Tunggu sampai muncul tulisan "Tersambung ke WhatsApp. Bot siap
+   mencatat transaksi."
+5. Coba kirim pesan "tarik tunai 100rb bri admin 5000" ke chat mana
+   saja (bukan grup) dari nomor itu. Bot akan membalas dengan tanda ✅,
+   dan transaksinya langsung muncul di Buku Kas D'Cell.
+
+Biarkan jendela Termux ini tetap terbuka (atau berjalan di latar
+belakang) selama bot ingin dipakai. Kalau ditutup paksa, bot berhenti
+membaca pesan sampai dijalankan lagi.
+
+LANGKAH 5 - SUPAYA TETAP MENYALA
+-------------------------------------
+Android suka mematikan aplikasi di latar belakang untuk hemat baterai.
+Supaya bot tidak mati sendiri:
+
+1. Matikan optimasi baterai untuk Termux:
+   Setelan HP > Aplikasi > Termux > Baterai > pilih "Tidak terbatas"
+   (nama menu bisa beda tergantung merek HP).
+2. Di dalam sesi Termux, sebelum menjalankan bot, ketik:
+     termux-wake-lock
+   (Kalau muncul "command not found", pasang dulu paket Termux:API dari
+   F-Droid dan jalankan "pkg install termux-api".)
+3. Pakai skrip start.sh yang ikut di folder ini supaya bot otomatis
+   jalan lagi kalau tiba-tiba berhenti:
+     bash start.sh
+4. (Opsional, lebih rapi) Pasang aplikasi "Termux:Boot" dari F-Droid,
+   lalu buat folder dan file berikut supaya bot otomatis menyala saat
+   HP dinyalakan ulang:
+     mkdir -p ~/.termux/boot
+     cp ~/wa-bot/boot-start.sh ~/.termux/boot/start-wa-bot.sh
+     chmod +x ~/.termux/boot/start-wa-bot.sh
+5. Sambungkan HP ke charger terus-menerus, dan pastikan Wi-Fi atau
+   paket data selalu aktif.
+
+UPDATE OTOMATIS LEWAT GITHUB (supaya tidak perlu zip-ekstrak-copy manual lagi)
+-------------------------------------------------------------------------------
+Cara ini membuat update berikutnya (kalau saya kirim perbaikan/fitur baru untuk
+bot ini) tinggal satu perintah di Termux, tanpa perlu unduh zip, ekstrak pakai
+ZArchiver, lalu copy file satu-satu lagi.
+
+PASANG SEKALI DI AWAL (ganti cara LANGKAH 2 di atas):
+1. Buat akun GitHub kalau belum ada (github.com), lalu buat repository BARU,
+   misalnya beri nama "wa-bot-dcell". Boleh "Public", karena folder ini TIDAK
+   berisi kunci Firebase (serviceAccountKey.json sengaja tidak ikut ter-upload).
+2. Di halaman repo itu: "Add file" > "Upload files", lalu upload SEMUA isi
+   folder "wabot" dari zip yang saya kirim (kecuali tidak perlu upload
+   serviceAccountKey.json kalau ada, memang tidak boleh diupload). Klik
+   "Commit changes".
+3. Di Termux, pasang git kalau belum: pkg install -y git (biasanya sudah ikut
+   terpasang dari LANGKAH 1).
+4. Clone repo itu ke Termux (ganti USERNAME dan NAMA-REPO sesuai punya Anda):
+     cd ~
+     git clone https://github.com/USERNAME/NAMA-REPO.git wa-bot
+     cd ~/wa-bot
+     npm install
+5. Taruh serviceAccountKey.json seperti biasa di LANGKAH 3 (file ini TIDAK
+   lewat GitHub, taruh manual lewat kabel/email/Drive seperti biasa).
+6. Jalankan seperti biasa: node index.js, scan QR.
+
+SETIAP ADA UPDATE BERIKUTNYA:
+1. Saya kirim file baru (zip) seperti biasa.
+2. Anda upload file yang berubah ke repo GitHub yang sama tadi (Add file >
+   Upload files > Commit changes, menimpa file lama -- sama persis seperti
+   cara upload aplikasi utama ke GitHub Pages).
+3. Di Termux, dari dalam folder ~/wa-bot, cukup jalankan:
+     bash update.sh
+   Ini otomatis mengambil file terbaru dari GitHub dan memasang ulang
+   kebutuhannya kalau ada yang baru.
+4. Jalankan lagi bot: bash start.sh (atau "sudo systemctl restart wa-bot"
+   kalau pakai Oracle).
+
+KALAU PERLU GANTI NOMOR ATAU BERMASALAH
+-------------------------------------------
+- Kalau WhatsApp di HP bot keluar sendiri atau mau ganti nomor, hapus
+  folder "session" di dalam wa-bot, lalu jalankan "node index.js" lagi
+  untuk memindai QR baru.
+- Kalau pesan Anda tidak dibalas bot sama sekali, pastikan jendela
+  Termux masih berjalan dan pesan diketik dari nomor yang sama dengan
+  yang di-scan tadi (bukan dari nomor lain).
+- Bot hanya membaca pesan yang ANDA KIRIM, bukan pesan masuk dari lawan
+  bicara, jadi aman dipakai untuk chat dengan pelanggan juga.
+
+BATASAN YANG PERLU DIKETAHUI
+---------------------------------
+- Ini bukan fitur resmi WhatsApp. WhatsApp bisa membatasi atau
+  memblokir nomor yang dipakai seperti ini kalau dianggap mencurigakan,
+  jadi jangan pakai nomor utama toko.
+- Kalau nanti Anda juga mengekspor chat HP ini sebagai file .txt dan
+  mengimpornya lewat fitur "Tempel pesan WhatsApp" di aplikasi sebagai
+  cadangan, ada kemungkinan kecil transaksi yang sudah dicatat bot ikut
+  tercatat dua kali, karena cara keduanya menandai pesan yang sudah
+  diproses sedikit berbeda. Periksa sekali-sekali di Riwayat kalau
+  melakukan ini.
+- HP bot harus tetap menyala dan online. Kalau mati atau internet
+  putus, pesan yang masuk selama itu TIDAK akan tercatat otomatis
+  (tidak ada riwayat yang diproses ulang setelah menyala lagi).

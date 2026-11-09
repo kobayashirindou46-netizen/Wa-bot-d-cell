@@ -1,0 +1,14 @@
+{
+  "name": "wa-bot-kas-dcell",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bot WhatsApp untuk mencatat transaksi otomatis ke Buku Kas D'Cell",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "@whiskeysockets/baileys": "6.7.9",
+    "firebase-admin": "12.6.0",
+    "pino": "9.4.0",
+    "qrcode-terminal": "0.12.0"
+  }
+}
