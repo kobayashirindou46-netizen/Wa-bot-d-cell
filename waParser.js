@@ -12,15 +12,15 @@ var TYPES = {
   tarik:    { label: 'Tarik tunai', fee: true, acc: true },
   setor:    { label: 'Setor tunai', fee: true, acc: true },
   topup:    { label: 'Top up e-wallet', fee: true, acc: true },
-  bayar:    { label: 'Bayar tagihan', fee: true, acc: true },
+  bayar:    { label: 'Bayar tagihan', pay: true, fee: true, acc: true },
   isi:      { label: 'Isi saldo agen', fee: false, acc: true },
-  keluar:   { label: 'Pengeluaran', fee: false, acc: false },
+  keluar:   { label: 'Pengeluaran', fee: false, acc: true },
   sesama:   { label: 'Sesama bank', like: 'transfer', fee: true, acc: true, dest: true },
-  elektrik: { label: 'Elektrik (listrik, token)', like: 'bayar', fee: true, acc: true },
-  online:   { label: 'Pulsa dan data', like: 'bayar', fee: true, acc: true },
+  elektrik: { label: 'Elektrik (listrik, token)', like: 'bayar', pay: true, fee: true, acc: true },
+  online:   { label: 'Pulsa dan data', like: 'bayar', pay: true, fee: true, acc: true },
   kartu:    { label: 'Kartu ATM nasabah', like: 'tarik', onlyAdm: true, fee: true, acc: false },
-  jual:     { label: 'Aksesoris (jual barang)', fee: false, acc: false, modal: true },
-  masuk:    { label: 'Pemasukan', fee: false, acc: false }
+  jual:     { label: 'Aksesoris (jual barang)', pay: true, fee: false, acc: false, modal: true },
+  masuk:    { label: 'Pemasukan', fee: false, acc: true }
 };
 function lk(t) { return (TYPES[t] && TYPES[t].like) || t; }
 
@@ -76,8 +76,15 @@ function waAcc(tok, kind, accs) {
   }
   return null;
 }
-/* dampak transaksi ke saldo rekening (saldo), laci tunai (kas), dan laba -- sama persis dengan aplikasi web */
-function fx(t) {
+/* dampak transaksi ke saldo rekening (saldo), laci tunai (kas), dan laba -- sama persis dengan aplikasi web.
+   accs (opsional): daftar rekening, dipakai untuk memastikan rekening tujuan memang masih ada. */
+function hasAcc(accs, id) {
+  if (!id || id === KAS) return false;
+  if (!accs) return true;
+  for (var i = 0; i < accs.length; i++) if (accs[i].id === id) return true;
+  return false;
+}
+function fx0(t, accs) {
   var a = +t.amount || 0, f = +t.fee || 0, k = +t.komisi || 0, b = +t.bf || 0;
   switch (lk(t.type)) {
     case 'transfer': case 'setor': case 'bayar': case 'topup':
@@ -87,11 +94,24 @@ function fx(t) {
       if (t.adm === 'dalam') return { saldo: a + f + k - b, kas: -a, laba: f + k - b };
       return { saldo: a + k - b, kas: -a + f, laba: f + k - b };
     case 'isi': return { saldo: a, kas: -a, laba: 0 };
-    case 'keluar': return { saldo: 0, kas: -a, laba: -a };
+    case 'keluar':
+      if (hasAcc(accs, t.acc)) return { saldo: -a, kas: 0, laba: -a };
+      return { saldo: 0, kas: -a, laba: -a };
     case 'jual': return { saldo: 0, kas: a, laba: a - (+t.modal || 0) };
-    case 'masuk': return { saldo: 0, kas: a, laba: a };
+    case 'masuk':
+      if (hasAcc(accs, t.acc)) return { saldo: a, kas: 0, laba: a };
+      return { saldo: 0, kas: a, laba: a };
   }
   return { saldo: 0, kas: 0, laba: 0 };
+}
+function fx(t, accs) {
+  var r = fx0(t, accs), T = TYPES[t.type];
+  /* pelanggan bayar transfer: uang masuk ke rekening yang dipilih, TIDAK masuk laci */
+  if (t.pay === 'transfer' && t.payAcc && T && T.pay && r.kas > 0 && hasAcc(accs, t.payAcc)) {
+    r.ex = [{ acc: t.payAcc, v: r.kas }];
+    r.kas = 0;
+  }
+  return r;
 }
 
 /* saldo semua rekening + laci tunai, dihitung dari seluruh riwayat (sama seperti kartu "Beranda" di aplikasi) */
@@ -103,9 +123,10 @@ function calcBalance(accs, kasAwal, txs, mvs) {
     else if (Object.prototype.hasOwnProperty.call(bal, id)) bal[id] += v;
   }
   (txs || []).forEach(function (t) {
-    var e = fx(t), a = t.acc;
-    if (a) add(a, e.saldo);
+    var e = fx(t, accs), a = t.acc;
+    if (a && a !== KAS) add(a, e.saldo);
     kas += e.kas;
+    if (e.ex) e.ex.forEach(function (x) { add(x.acc, x.v); });
   });
   (mvs || []).forEach(function (m) {
     var v = +m.amount || 0, f = +m.fee || 0;
@@ -132,7 +153,7 @@ function waLine(raw, defDate, accs) {
   var T = type === 'pindah' ? null : TYPES[type];
   var i = 1, amount = null, fee = 0, kom = 0, bf = 0, modal = 0, bt = '', rek = '', adm = null,
       accIds = [], name = [], err = null, low, v, tok, ew = null, hp = '';
-  var ewSrc = false, ewSrcDone = false;
+  var ewSrc = false, ewSrcDone = false, pay = null, payAcc = '', payWait = false;
   if (type === 'topup') {
     var nb = false, ne = 0;
     toks.slice(1).forEach(function (t0) {
@@ -155,6 +176,19 @@ function waLine(raw, defDate, accs) {
       i++; continue;
     }
     if (lk(type) === 'tarik' && ADM[low]) { adm = low; continue; }
+    /* cara bayar pelanggan: cash/tunai, atau tf/trf/transfer lalu (boleh) nama rekening tujuan */
+    if (T && T.pay) {
+      if (payWait) {
+        payWait = false;
+        var two2 = i + 1 < toks.length ? waAcc(low + toks[i + 1].toLowerCase().replace(/[,;]+$/, ''), null, accs) : null;
+        if (two2 && !two2.amb && accs.some(function (a) { return a.id === two2.id && waNorm(a.name) === waNorm(low + toks[i + 1]); })) { payAcc = two2.id; i++; continue; }
+        var rp2 = waAcc(low, null, accs);
+        if (rp2 && rp2.amb) { err = 'rekening-tujuan-ganda'; break; }
+        if (rp2) { payAcc = rp2.id; continue; }
+      }
+      if (low === 'cash' || low === 'tunai') { pay = 'cash'; continue; }
+      if (low === 'tf' || low === 'trf' || low === 'tfr' || low === 'transf' || low === 'transfer') { pay = 'transfer'; payWait = true; continue; }
+    }
     if (low === 'kemarin') { var yd = new Date(); yd.setDate(yd.getDate() - 1); date = ymd(yd); continue; }
     var dm = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/.exec(low);
     if (dm) { date = waDate(+dm[1], +dm[2], dm[3] || ''); if (!date) { err = 'tanggal'; break; } continue; }
@@ -176,8 +210,11 @@ function waLine(raw, defDate, accs) {
     v = waAmount(low);
     if (v != null && amount == null) { amount = v; continue; }
     if (type === 'pindah' || T.acc) {
-      if (type === 'pindah' && (low === 'kas' || low === 'laci' || low === 'tunai') && accIds.length < 2) { accIds.push(KAS); continue; }
+      if ((type === 'pindah' || lk(type) === 'keluar' || lk(type) === 'masuk') && (low === 'kas' || low === 'laci' || low === 'tunai') && accIds.length < (type === 'pindah' ? 2 : 1)) { accIds.push(KAS); continue; }
       if (accIds.length < (type === 'pindah' ? 2 : 1)) {
+        /* nama rekening dua kata, misalnya "sagara mobile" */
+        var two = i + 1 < toks.length ? waAcc(low + toks[i + 1].toLowerCase().replace(/[,;]+$/, ''), type === 'topup' ? 'bank' : null, accs) : null;
+        if (two && !two.amb && accs.some(function (a) { return a.id === two.id && waNorm(a.name) === waNorm(low + toks[i + 1]); })) { accIds.push(two.id); i++; continue; }
         var r = waAcc(low, type === 'topup' ? 'bank' : null, accs);
         if (!r && type === 'topup') r = waAcc(low, 'ewallet', accs);
         if (r && r.amb) { err = 'rekening-ganda'; break; }
@@ -196,10 +233,20 @@ function waLine(raw, defDate, accs) {
   }
   var t = { date: date, type: type, name: name.join(' '), amount: amount, fee: T.fee ? fee : 0, komisi: T.fee ? kom : 0, bf: T.fee ? bf : 0, acc: '', note: "Dari WhatsApp (otomatis)" };
   if (T.modal) t.modal = modal;
+  if (T.pay) {
+    t.pay = pay || 'cash';
+    if (t.pay === 'transfer') {
+      var pid = payAcc;
+      if (!pid) { var pl = accs.filter(function (a) { return a.kind === 'bank' || a.kind === 'ewallet'; }); if (pl.length === 1) pid = pl[0].id; }
+      if (!pid) return { ok: false, msg: 'Tulis rekening tujuan transfer pelanggan, misalnya "tf bri" atau "trf gopay".' };
+      t.payAcc = pid;
+    }
+  }
   if (T.dest && bt) { t.bt = bt; if (rek) t.rek = rek; }
   if (T.acc) {
     var id = accIds[0], pool = accs;
     if (type === 'topup') { var bk = accs.filter(function (a) { return a.kind === 'bank'; }); if (bk.length) pool = bk; }
+    if (!id && (lk(type) === 'keluar' || lk(type) === 'masuk')) id = KAS;
     if (!id) {
       if (!pool.length) return { ok: false, msg: 'Belum ada rekening.' };
       if (pool.length > 1) return { ok: false, msg: 'Nama ' + (type === 'topup' ? 'rekening pengirim (bank atau e-wallet)' : 'rekening') + ' tidak ditemukan.' };

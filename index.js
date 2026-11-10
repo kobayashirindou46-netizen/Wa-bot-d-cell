@@ -120,6 +120,7 @@ function successText(r) {
   if (o2.komisi) L2.push('• Komisi: ' + rp(o2.komisi));
   if (o2.bf) L2.push('• Potongan bank: ' + rp(o2.bf));
   if (T.modal && o2.modal) L2.push('• Modal: ' + rp(o2.modal));
+  if (T.pay) L2.push('• Pelanggan bayar: ' + (o2.pay === 'transfer' ? 'transfer ke ' + accName(o2.payAcc) : 'tunai'));
   L2.push('• Tanggal: ' + tgl(o2.date));
   return L2.join('\n');
 }
@@ -171,7 +172,7 @@ function todayText() {
     var mvs = r[1].docs.map(function (d) { return d.data(); });
     var masuk = 0, keluar = 0, laba = 0, byType = {};
     txs.forEach(function (x) {
-      var e = WA.fx(x);
+      var e = WA.fx(x, accsCache);
       laba += e.laba;
       if (e.kas > 0) masuk += e.kas; else keluar += -e.kas;
       var label = (TYPES[x.type] || {}).label || x.type;
