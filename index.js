@@ -19,8 +19,8 @@ var {
   fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 
-var WA = require('./waParser');
-var TOKO = require('./toko');
+var WA = require('./waParser.js');
+var TOKO = require('./toko.js');
 var waLine = WA.waLine, TYPES = WA.TYPES, ADM = WA.ADM, calcBalance = WA.calcBalance;
 
 var ROOT = __dirname;
