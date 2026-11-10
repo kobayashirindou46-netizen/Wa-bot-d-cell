@@ -37,24 +37,50 @@ if (!fs.existsSync(SA_PATH)) {
 admin.initializeApp({ credential: admin.credential.cert(require(SA_PATH)) });
 var db = admin.firestore();
 
+/* ---------- cari toko (shopId) -----------
+   Sejak aplikasi diperbarui ke struktur multi-toko, semua data pindah ke
+   shops/{shopId}/tx, shops/{shopId}/acc, dst. Untuk pemilik (owner),
+   shopId = uid akun owner itu sendiri. Bot mencari otomatis siapa pemiliknya
+   lewat koleksi "users", supaya tidak perlu diisi manual. */
+var shopId = null;
+function resolveShopId() {
+  if (shopId) return Promise.resolve(shopId);
+  return db.collection('users').where('role', '==', 'owner').limit(1).get().then(function (snap) {
+    if (snap.empty) {
+      throw new Error('Tidak menemukan akun pemilik (owner) di Firestore. Pastikan aplikasi web sudah pernah dibuka dan login minimal sekali.');
+    }
+    var d = snap.docs[0];
+    shopId = d.data().shopId || d.id;
+    console.log('Toko ditemukan, shopId:', shopId);
+    return shopId;
+  });
+}
+function P(p) { return 'shops/' + shopId + '/' + p; }
+
 var accsCache = [];
 function refreshAccs() {
-  return db.collection('acc').get().then(function (snap) {
+  return resolveShopId().then(function () {
+    return db.collection(P('acc')).get();
+  }).then(function (snap) {
     accsCache = snap.docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
   }).catch(function (e) { console.error('Gagal membaca daftar rekening:', e.message); });
 }
 
 function alreadyProcessed(sig) {
-  return Promise.all([
-    db.collection('tx').where('wa', '==', sig).limit(1).get(),
-    db.collection('mv').where('wa', '==', sig).limit(1).get()
-  ]).then(function (r) { return !r[0].empty || !r[1].empty; });
+  return resolveShopId().then(function () {
+    return Promise.all([
+      db.collection(P('tx')).where('wa', '==', sig).limit(1).get(),
+      db.collection(P('mv')).where('wa', '==', sig).limit(1).get()
+    ]);
+  }).then(function (r) { return !r[0].empty || !r[1].empty; });
 }
 
 function saveTx(kind, obj, sig) {
   obj.wa = sig;
   obj.createdAt = Date.now();
-  return db.collection(kind === 'mv' ? 'mv' : 'tx').add(obj);
+  return resolveShopId().then(function () {
+    return db.collection(P(kind === 'mv' ? 'mv' : 'tx')).add(obj);
+  });
 }
 
 /* ---------- format balasan ---------- */
@@ -101,12 +127,14 @@ function successText(r) {
 /* ---------- cek saldo ---------- */
 var SALDO_RE = /^(cek\s+)?saldo\b/i;
 function saldoText() {
-  return Promise.all([
-    db.collection('acc').get(),
-    db.collection('tx').get(),
-    db.collection('mv').get(),
-    db.doc('settings/main').get()
-  ]).then(function (r) {
+  return resolveShopId().then(function () {
+    return Promise.all([
+    db.collection(P('acc')).get(),
+    db.collection(P('tx')).get(),
+    db.collection(P('mv')).get(),
+    db.doc(P('settings/main')).get()
+  ]);
+  }).then(function (r) {
     var accs = r[0].docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
     var txs = r[1].docs.map(function (d) { return d.data(); });
     var mvs = r[2].docs.map(function (d) { return d.data(); });
@@ -133,10 +161,12 @@ function todayStr() { var d = new Date(); return d.getFullYear() + '-' + pad2(d.
 var TODAY_RE = /^(cek\s+)?transaksi(\s+hari\s*ini)?\s*$/i;
 function todayText() {
   var t = todayStr();
-  return Promise.all([
-    db.collection('tx').where('date', '==', t).get(),
-    db.collection('mv').where('date', '==', t).get()
-  ]).then(function (r) {
+  return resolveShopId().then(function () {
+    return Promise.all([
+    db.collection(P('tx')).where('date', '==', t).get(),
+    db.collection(P('mv')).where('date', '==', t).get()
+  ]);
+  }).then(function (r) {
     var txs = r[0].docs.map(function (d) { return d.data(); });
     var mvs = r[1].docs.map(function (d) { return d.data(); });
     var masuk = 0, keluar = 0, laba = 0, byType = {};
@@ -168,6 +198,7 @@ function todayText() {
 
 /* ---------- bot WhatsApp ---------- */
 async function start() {
+  await resolveShopId();
   await refreshAccs();
   var auth = await useMultiFileAuthState(SESSION_DIR);
   var state = auth.state, saveCreds = auth.saveCreds;
