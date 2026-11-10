@@ -279,6 +279,7 @@ function todayText(sid) {
 
 /* ---------- bot WhatsApp ---------- */
 var curSock = null, tokoLoaded = false, reconnTimer = null;
+var ownEnabled = true;
 process.on('unhandledRejection', function (e) { console.error('[PERINGATAN] Error tidak tertangkap:', e && e.message ? e.message : e); });
 process.on('uncaughtException', function (e) { console.error('[PERINGATAN] Error:', e && e.message ? e.message : e); });
 function scheduleReconnect(ms) {
@@ -297,7 +298,12 @@ async function start() {
   }
   await resolveShopId();
   await refreshAccs(ownShopId);
-  if (!tokoLoaded) { await loadToko(); tokoLoaded = true; }
+  if (!tokoLoaded) {
+    await loadToko(); tokoLoaded = true;
+    var uCfg = readTokoFile().utama;
+    ownEnabled = !(uCfg && uCfg.pesanSendiri === false);
+    console.log(ownEnabled ? 'Pesan yang diketik dari HP bot ini ikut dicatat.' : 'Pesan yang diketik dari HP bot ini DIABAIKAN. Hanya nomor terdaftar di toko.json yang dicatat.');
+  }
   var auth = await useMultiFileAuthState(SESSION_DIR);
   var state = auth.state, saveCreds = auth.saveCreds;
   var ver = (await fetchLatestBaileysVersion()).version;
@@ -363,6 +369,7 @@ async function handleMessage(sock, msg) {
   /* siapa pengirimnya, dan toko mana yang dicatat */
   var sid, judul = 'Saldo Buku Kas D\'Cell', toko = null;
   if (msg.key.fromMe) {
+    if (!ownEnabled) return;                    /* pengaturan "pesanSendiri": false di toko.json */
     sid = await resolveShopId();                /* pesan yang ANDA ketik sendiri = toko utama */
   } else {
     toko = TOKO.findToko(tokoIndex, msg.key);   /* pesan masuk hanya dari nomor yang terdaftar */
