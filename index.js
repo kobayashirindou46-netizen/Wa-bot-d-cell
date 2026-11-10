@@ -194,6 +194,17 @@ function shortText(r, accs) {
   return '✅ *' + T.label + '* ' + rp(o.amount) + (P2.length ? ' — ' + P2.join(', ') : '');
 }
 
+
+/* balasan kalau pesan tidak bisa dibaca: alasan + contoh/koreksi yang benar + daftar rekening */
+function failText(r, accs) {
+  var L = ['⚠️ ' + (r.msg || 'Pesan tidak bisa dibaca.')];
+  if (r.corrected) { L.push(''); L.push('Kalau maksudnya ini, kirim ulang:'); L.push(r.corrected); }
+  else if (r.example) { L.push(''); L.push('Contoh yang benar:'); L.push(r.example); }
+  var names = (accs || []).map(function (a) { return a.name; }).filter(Boolean);
+  if (names.length && /rekening|tujuan|pengirim/i.test(r.msg || '')) { L.push(''); L.push('Nama rekening yang ada: ' + names.join(', ')); }
+  return L.join('\n');
+}
+
 /* ---------- cek saldo ---------- */
 var SALDO_RE = /^(cek\s+)?saldo\b/i;
 function saldoText(sid, judul) {
@@ -330,7 +341,16 @@ async function start() {
     if (ev.type !== 'notify') return;
     for (var i = 0; i < ev.messages.length; i++) {
       var msg = ev.messages[i];
-      try { await handleMessage(sock, msg); } catch (e) { console.error('Gagal memproses pesan:', e.message); }
+      try { await handleMessage(sock, msg); } catch (e) {
+        console.error('Gagal memproses pesan:', e && e.stack ? e.stack : e);
+        /* beri tahu pengirim kenapa gagal, supaya tidak hening (kecuali balasan bot sendiri) */
+        try {
+          var mm = msg.message, tt = ((mm && (mm.conversation || (mm.extendedTextMessage && mm.extendedTextMessage.text))) || '').trim();
+          if (tt && !/^(✅|⚠️|💰|📊)/.test(tt) && msg.key.remoteJid && !msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(msg.key.remoteJid, { text: '⚠️ Bot gagal mencatat: ' + String((e && e.message) || e).slice(0, 200) }, { quoted: msg });
+          }
+        } catch (e2) { /* abaikan */ }
+      }
     }
   });
 }
@@ -395,12 +415,12 @@ async function handleMessage(sock, msg) {
     if (r.skip) return;                         /* bukan baris transaksi, abaikan diam-diam */
     var sig = 'bot:' + msg.key.id;
     if (!r.ok) {
-      await sock.sendMessage(jid, { text: '⚠️ ' + (r.msg || 'Pesan tidak bisa dibaca.') + '\nContoh: "tarik tunai 500rb bri admin 5000"' }, { quoted: msg });
+      await sock.sendMessage(jid, { text: failText(r, accs) }, { quoted: msg });
       return;
     }
     if (await alreadyProcessed(sid, sig)) return;
     await saveTx(sid, r.kind, r.obj, sig);
-    var reply = successText(r, accs);
+    var reply = successText(r, accs) + (r.note ? '\n\nℹ️ Urutan pesan dikoreksi: ' + r.note : '');
     await sock.sendMessage(jid, { text: reply }, { quoted: msg });
     console.log(new Date().toLocaleString('id-ID'), '-', tag + reply.replace(/\n/g, ' | ').replace(/^✅\s*/, ''));
     return;
@@ -414,7 +434,7 @@ async function handleMessage(sock, msg) {
   for (var k = 0; k < parsed.length; k++) {
     var pr = parsed[k], no = (k + 1) + '. ';
     if (pr.r.skip) { badN++; out.push(no + '⚠️ Baris tidak dikenali: ' + shorten(pr.ln)); continue; }
-    if (!pr.r.ok) { badN++; out.push(no + '⚠️ ' + (pr.r.msg || 'Tidak bisa dibaca.') + ' (' + shorten(pr.ln) + ')'); continue; }
+    if (!pr.r.ok) { badN++; out.push(no + '⚠️ ' + (pr.r.msg || 'Tidak bisa dibaca.') + ' (' + shorten(pr.ln) + ')' + (pr.r.corrected ? '\n   → ' + pr.r.corrected : (pr.r.example ? '\n   Contoh: ' + pr.r.example : ''))); continue; }
     var sigK = 'bot:' + msg.key.id + ':' + k;
     try {
       if (!(await alreadyProcessed(sid, sigK))) await saveTx(sid, pr.r.kind, pr.r.obj, sigK);

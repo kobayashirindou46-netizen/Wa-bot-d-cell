@@ -27,13 +27,14 @@ function lk(t) { return (TYPES[t] && TYPES[t].like) || t; }
 var ADM = { luar: 1, dalam: 1, potong: 1 };
 
 var WA_TYPES = {
-  tarik: 'tarik', tt: 'tarik', transfer: 'transfer', tf: 'transfer', trf: 'transfer',
+  tarik: 'tarik', tt: 'tarik', transfer: 'transfer', tranfer: 'transfer', trasfer: 'transfer', transper: 'transfer', tf: 'transfer', trf: 'transfer',
   bayar: 'bayar', tagihan: 'bayar', ppob: 'bayar', isi: 'isi', topup: 'topup', top: 'topup',
   listrik: 'elektrik', pln: 'elektrik', token: 'elektrik', elektrik: 'elektrik',
   pulsa: 'online', data: 'online', paket: 'online', kartu: 'kartu', gesek: 'kartu',
   jual: 'jual', aksesoris: 'jual', penjualan: 'jual', masuk: 'masuk', pemasukan: 'masuk',
   income: 'masuk', keluar: 'keluar', pengeluaran: 'keluar', beli: 'keluar',
-  pindah: 'pindah', mutasi: 'pindah'
+  pindah: 'pindah', mutasi: 'pindah',
+  setor: 'setor', setortunai: 'setor', sesama: 'sesama'
 };
 var WA_EW = { dana: 'DANA', ovo: 'OVO', gopay: 'GoPay', shopeepay: 'ShopeePay', shopee: 'ShopeePay', linkaja: 'LinkAja' };
 var BANK_ALIAS = {
@@ -114,6 +115,21 @@ function fx(t, accs) {
   return r;
 }
 
+/* rekening default bila catatan tidak punya rekening valid: bank pertama, lalu e-wallet pertama (sama dengan aplikasi) */
+function defAcc(accs) {
+  function first(kind) {
+    return (accs || []).filter(function (a) { return a.kind === kind; })
+      .sort(function (x, y) { return (x.createdAt || 0) - (y.createdAt || 0) || String(x.name).localeCompare(String(y.name)); })[0] || null;
+  }
+  return first('bank') || first('ewallet');
+}
+function txAcc(t, accs) {
+  if (t.acc === KAS && t.type === 'kartu') return KAS;
+  if (t.acc && (accs || []).some(function (a) { return a.id === t.acc; })) return t.acc;
+  var d = defAcc(accs);
+  return d ? d.id : null;
+}
+
 /* saldo semua rekening + laci tunai, dihitung dari seluruh riwayat (sama seperti kartu "Beranda" di aplikasi) */
 function calcBalance(accs, kasAwal, txs, mvs) {
   var bal = {}, kas = +kasAwal || 0;
@@ -123,8 +139,8 @@ function calcBalance(accs, kasAwal, txs, mvs) {
     else if (Object.prototype.hasOwnProperty.call(bal, id)) bal[id] += v;
   }
   (txs || []).forEach(function (t) {
-    var e = fx(t, accs), a = t.acc;
-    if (a && a !== KAS) add(a, e.saldo);
+    var e = fx(t, accs), a = txAcc(t, accs);
+    if (a) add(a, e.saldo);
     kas += e.kas;
     if (e.ex) e.ex.forEach(function (x) { add(x.acc, x.v); });
   });
@@ -144,8 +160,21 @@ function waDate(d, mo, y) {
   return dt.getFullYear() === yy && dt.getMonth() === mo - 1 && dt.getDate() === d ? ymd(dt) : null;
 }
 
+/* pesan beberapa baris: satu baris = satu transaksi. Nomor urut di depan baris ("1 tarik...", "2. transfer...",
+   "- bayar...") dibuang kalau sesudahnya ada jenis transaksi. */
+function splitLines(text) {
+  return String(text || '').split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean).map(function (l) {
+    var m = /^(?:\d{1,2}\s*[.):\-]?|[-•*])\s*(.+)$/.exec(l);
+    if (m) {
+      var first = m[1].split(/\s+/)[0].toLowerCase().replace(/[^a-z]/g, '');
+      if (WA_TYPES[first]) return m[1];
+    }
+    return l;
+  });
+}
+
 /* raw: teks pesan apa adanya (tanpa header waktu/nama, beda dari file ekspor chat) */
-function waLine(raw, defDate, accs) {
+function waLine0(raw, defDate, accs) {
   var text = raw, date = null;
   var toks = text.split(/\s+/).filter(Boolean);
   var type = toks.length ? WA_TYPES[toks[0].toLowerCase().replace(/[^a-z]/g, '')] : null;
@@ -266,4 +295,115 @@ function waLine(raw, defDate, accs) {
   return { ok: true, kind: 'tx', obj: t };
 }
 
-module.exports = { waLine: waLine, TYPES: TYPES, ADM: ADM, waNorm: waNorm, fx: fx, calcBalance: calcBalance };
+
+/* ---------- koreksi otomatis & contoh format yang benar ---------- */
+var EXAMPLES = {
+  tarik: 'tarik tunai 500rb bri admin 5000',
+  transfer: 'transfer 1jt bri bca 1234567890 ani admin 5000',
+  setor: 'setor tunai 1jt bni admin 3000',
+  topup: 'topup 100rb dana 081234567890 bri',
+  bayar: 'bayar 235rb dana admin 2500 listrik pln',
+  isi: 'isi saldo 2jt bri',
+  keluar: 'keluar 50rb beli galon',
+  sesama: 'sesama 200rb bri bni ani admin 2500',
+  elektrik: 'listrik 200rb bri admin 3000 cash',
+  online: 'pulsa 10rb bri admin 3rb komisi 1000 pot 2rb cash',
+  kartu: 'kartu 500rb admin 5000',
+  jual: 'jual 50rb modal 30rb cash',
+  masuk: 'masuk 100rb bri hasil dagang',
+  pindah: 'pindah 500rb bri dana'
+};
+var CANON = { tarik: 'tarik', transfer: 'transfer', bayar: 'bayar', isi: 'isi', topup: 'topup', elektrik: 'listrik', online: 'pulsa', kartu: 'kartu', jual: 'jual', masuk: 'masuk', keluar: 'keluar', pindah: 'pindah', setor: 'setor', sesama: 'sesama' };
+var CASH_TYPO = { kash: 1, cas: 1, csh: 1, cesh: 1, cashh: 1, casj: 1 };
+var KW_ATTACHED = /^(admin|adm|fee|komisi|kom|pot|potongan|pajak|modal)(\d[\d.,]*(?:rb|ribu|k|jt|juta)?)$/i;
+
+/* perbaikan yang aman: "admin5000" -> "admin 5000", "kash" -> "cash" */
+function normalizeRaw(raw) {
+  var out = [];
+  String(raw || '').split(/\s+/).filter(Boolean).forEach(function (t) {
+    var m = KW_ATTACHED.exec(t);
+    if (m) { out.push(m[1], m[2]); return; }
+    if (CASH_TYPO[t.toLowerCase().replace(/[,;]+$/, '')]) { out.push('cash'); return; }
+    out.push(t);
+  });
+  return out.join(' ');
+}
+
+/* jarak ketik (hapus/tambah/ganti 1 huruf, atau tukar 2 huruf berdampingan) */
+function editDist(a, b) {
+  var d = [], i, j;
+  for (i = 0; i <= a.length; i++) { d[i] = [i]; }
+  for (j = 1; j <= b.length; j++) d[0][j] = j;
+  for (i = 1; i <= a.length; i++) for (j = 1; j <= b.length; j++) {
+    var c = a[i - 1] === b[j - 1] ? 0 : 1;
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + c);
+    if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+  }
+  return d[a.length][b.length];
+}
+function hasBigAmount(toks) {
+  return toks.some(function (t) { var l = t.toLowerCase().replace(/[,;]+$/, ''); return /(rb|ribu|k|jt|juta)$/.test(l) ? waAmount(l) != null : /^\d{4,}$/.test(l.replace(/[.,]/g, '')) && waAmount(l) != null; });
+}
+
+/* urutan kebalik: "10rb pulsa bri" -> "pulsa 10rb bri", "pulsa 10rb bri 3rb admin" -> "... admin 3rb".
+   Hanya memindahkan kata (tidak menambah/mengubah isi), dan hanya kalau kata sebelum jenis transaksi
+   berupa nominal / nama rekening / kata admin-cash, supaya obrolan biasa tidak ikut tercatat. */
+var KW_VAL = { admin: 1, adm: 1, fee: 1, komisi: 1, kom: 1, pot: 1, potongan: 1, pajak: 1, modal: 1 };
+function reorder(text, accs) {
+  var toks = text.split(/\s+/).filter(Boolean), changed = false;
+  if (!toks.length) return { text: text, changed: false };
+  var first = toks[0].toLowerCase().replace(/[^a-z]/g, '');
+  if (!WA_TYPES[first]) {
+    var idx = -1;
+    for (var i = 1; i < Math.min(toks.length, 5); i++) {
+      var w = toks[i].toLowerCase().replace(/[,;]+$/, '');
+      if (/^[a-z]+$/.test(w) && WA_TYPES[w]) { idx = i; break; }
+    }
+    if (idx > 0) {
+      var okBefore = toks.slice(0, idx).every(function (t) {
+        var l = t.toLowerCase().replace(/[,;]+$/, '');
+        return waAmount(l) != null || KW_VAL[l] || l === 'cash' || l === 'tunai' || l === 'kas' || l === 'laci' || !!waAcc(l, null, accs);
+      });
+      if (okBefore) {
+        var moved = [toks.splice(idx, 1)[0]];
+        var nl = (toks[idx] || '').toLowerCase().replace(/[,;]+$/, '');   /* \"tarik tunai\", \"isi saldo\", \"top up\" tetap sepaket */
+        if (nl === 'tunai' || nl === 'saldo' || nl === 'up') moved.push(toks.splice(idx, 1)[0]);
+        toks = moved.concat(toks); changed = true;
+      }
+    }
+  }
+  /* "3rb admin" (nilai di depan kata) -> "admin 3rb", hanya setelah ada nominal utama sebelumnya */
+  var seenAmt = false, out = [];
+  for (var j = 0; j < toks.length; j++) {
+    var cur = toks[j], lc = cur.toLowerCase().replace(/[,;]+$/, ''), nx = (toks[j + 1] || '').toLowerCase().replace(/[,;]+$/, ''), nn = toks[j + 2] ? waAmount(toks[j + 2].toLowerCase().replace(/[,;]+$/, '')) : null;
+    if (j > 0 && waAmount(lc) != null && KW_VAL[nx] && nn == null && seenAmt) { out.push(toks[j + 1], cur); j++; changed = true; continue; }
+    if (j > 0 && waAmount(lc) != null) seenAmt = true;
+    out.push(cur);
+  }
+  return { text: out.join(' '), changed: changed };
+}
+
+function waLine(raw, defDate, accs) {
+  var text = normalizeRaw(raw);
+  var ro = reorder(text, accs || []);
+  var r = waLine0(ro.text, defDate, accs);
+  if (ro.changed && !r.skip) { r.note = ro.text; text = ro.text; }
+  var toks = text.split(/\s+/).filter(Boolean);
+  var first = toks.length ? toks[0].toLowerCase().replace(/[^a-z]/g, '') : '';
+  if (r.skip) {
+    /* kata pertama salah ketik (misalnya "pulas", "tranfsr") tapi ada nominal: tawarkan versi yang benar */
+    if (first.length >= 4 && hasBigAmount(toks)) {
+      var best = null;
+      Object.keys(WA_TYPES).forEach(function (k) { if (k.length >= 4 && editDist(first, k) === 1) best = best || k; });
+      if (best) {
+        var t2 = WA_TYPES[best], canon = CANON[t2] || best;
+        return { ok: false, msg: 'Kata "' + toks[0] + '" tidak dikenal, mungkin maksud Anda "' + canon + '".', corrected: [canon].concat(toks.slice(1)).join(' '), type: t2, example: EXAMPLES[t2] };
+      }
+    }
+    return r;
+  }
+  if (!r.ok) { r.type = WA_TYPES[first]; r.example = EXAMPLES[r.type]; }
+  return r;
+}
+
+module.exports = { waLine: waLine, TYPES: TYPES, ADM: ADM, waNorm: waNorm, lk: lk, fx: fx, calcBalance: calcBalance, splitLines: splitLines };
