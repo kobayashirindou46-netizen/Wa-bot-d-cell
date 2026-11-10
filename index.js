@@ -113,10 +113,11 @@ async function loadToko() {
   tokoIndex = TOKO.buildIndex(ok);
 }
 
-var accsByShop = {};
+var accsByShop = {}, settingsByShop = {};
 function refreshAccs(sid) {
-  return db.collection(P(sid, 'acc')).get().then(function (snap) {
-    accsByShop[sid] = snap.docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
+  return Promise.all([db.collection(P(sid, 'acc')).get(), db.doc(P(sid, 'settings/main')).get()]).then(function (r) {
+    accsByShop[sid] = r[0].docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
+    settingsByShop[sid] = r[1].exists ? r[1].data() : {};
     return accsByShop[sid];
   }).catch(function (e) { console.error('Gagal membaca daftar rekening:', e.message); return accsByShop[sid] || []; });
 }
@@ -162,12 +163,13 @@ function successText(r, accs) {
   }
   var o2 = r.obj, T = TYPES[o2.type];
   var L2 = ['✅ *' + T.label + '* tercatat'];
-  L2.push('• Nominal: ' + rp(o2.amount));
+  if (!T.onlyAdm) L2.push('• Nominal: ' + rp(o2.amount));
   if (o2.name) L2.push('• Nama: ' + o2.name);
   if (T.acc && o2.acc) L2.push('• ' + (o2.type === 'topup' ? 'Dari' : 'Rekening') + ': ' + accName(accs, o2.acc));
   if (o2.bt) L2.push('• Bank tujuan: ' + o2.bt + (o2.rek ? ' (' + o2.rek + ')' : ''));
   if (o2.ew) L2.push('• E-wallet tujuan: ' + o2.ew + (o2.hp ? ' (' + o2.hp + ')' : ''));
-  if (T.fee && o2.fee) L2.push('• Admin: ' + rp(o2.fee) + (o2.adm ? ' (' + (ADM_LABEL[o2.adm] || o2.adm) + ')' : ''));
+  if (T.onlyAdm) L2.push('• Masuk laci: ' + rp(o2.fee));
+  else if (T.fee && o2.fee) L2.push('• Admin: ' + rp(o2.fee) + (o2.adm ? ' (' + (ADM_LABEL[o2.adm] || o2.adm) + ')' : ''));
   if (o2.komisi) L2.push('• Komisi: ' + rp(o2.komisi));
   if (o2.bf) L2.push('• Potongan bank: ' + rp(o2.bf));
   if (T.modal && o2.modal) L2.push('• Modal: ' + rp(o2.modal));
@@ -191,7 +193,7 @@ function shortText(r, accs) {
   if (T.fee && o.fee) P2.push('admin ' + rp(o.fee));
   if (o.komisi) P2.push('komisi ' + rp(o.komisi));
   if (T.pay && o.pay === 'transfer') P2.push('bayar transfer ke ' + accName(accs, o.payAcc));
-  return '✅ *' + T.label + '* ' + rp(o.amount) + (P2.length ? ' — ' + P2.join(', ') : '');
+  return '✅ *' + T.label + '* ' + rp(T.onlyAdm ? o.fee : o.amount) + (P2.length ? ' — ' + P2.join(', ') : '');
 }
 
 
@@ -235,6 +237,86 @@ function saldoText(sid, judul) {
 }
 function pad2(n) { return (n < 10 ? '0' : '') + n; }
 function todayStr() { var d = new Date(); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+
+/* ---------- koreksi saldo (samakan catatan dengan uang/saldo yang sebenarnya) ----------
+   Sama seperti "Ubah saldo" di aplikasi: selisih dicatat sebagai koreksi saldo awal,
+   jadi tidak muncul sebagai transaksi dan tidak mengubah laba. Memakai nilai tujuan (bukan
+   selisih), jadi kalau pesan terproses dua kali hasilnya tetap sama. */
+var KOREKSI_RE = /^(koreksi|samakan|sesuaikan)\b/i;
+var KAS_WORDS = { laci: 1, kas: 1, tunai: 1, cash: 1 };
+function rpS(n) { return (n > 0 ? '+' : n < 0 ? '−' : '') + rp(Math.abs(n)); }
+
+function koreksiSaldo(sid, text, judul) {
+  return Promise.all([
+    db.collection(P(sid, 'acc')).get(),
+    db.collection(P(sid, 'tx')).get(),
+    db.collection(P(sid, 'mv')).get(),
+    db.doc(P(sid, 'settings/main')).get()
+  ]).then(function (r) {
+    var accs = r[0].docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
+    var txs = r[1].docs.map(function (d) { return d.data(); });
+    var mvs = r[2].docs.map(function (d) { return d.data(); });
+    var kasAwal = r[3].exists ? (+r[3].data().kasAwal || 0) : 0;
+    accsByShop[sid] = accs;
+    var c = calcBalance(accs, kasAwal, txs, mvs);
+
+    var lines = text.split(/\r?\n/).map(function (l) { return l.replace(KOREKSI_RE, '').trim(); }).filter(Boolean);
+    if (!lines.length) {
+      /* tanpa isi: kirim contoh yang tinggal disalin dan diubah angkanya */
+      var T = ['🛠️ *Koreksi saldo*', 'Salin pesan di bawah, ubah angkanya sesuai saldo/uang yang sebenarnya, lalu kirim:', '', 'koreksi', 'laci ' + Math.round(c.kas)];
+      accs.slice().sort(function (a, b) { return (a.createdAt || 0) - (b.createdAt || 0); }).forEach(function (a) {
+        T.push(String(a.name).toLowerCase().replace(/\s+/g, '') + ' ' + Math.round(c.bal[a.id] || 0));
+      });
+      T.push('', 'Boleh satu per satu (contoh: "koreksi bri 5jt") atau hanya yang perlu dikoreksi.');
+      return T.join('\n');
+    }
+
+    var targets = {}, order = [], bad = [];
+    lines.forEach(function (ln) {
+      var toks = ln.split(/\s+/).filter(Boolean), amount = null, name = [];
+      toks.forEach(function (t) {
+        var v = WA.waAmount(t.toLowerCase());
+        if (v != null && amount == null) amount = v; else name.push(t);
+      });
+      if (amount == null) { bad.push('⚠️ Nominal tidak ditemukan: ' + shorten(ln)); return; }
+      if (!name.length) { bad.push('⚠️ Nama rekening tidak ditulis: ' + shorten(ln)); return; }
+      var id = null, amb = false;
+      if (name.length === 1 && KAS_WORDS[name[0].toLowerCase().replace(/[^a-z]/g, '')]) id = WA.KAS;
+      else if (name.every(function (w) { return KAS_WORDS[w.toLowerCase().replace(/[^a-z]/g, '')]; })) id = WA.KAS;
+      else {
+        var cands = [name.join('')].concat(name);
+        for (var i = 0; i < cands.length && !id && !amb; i++) {
+          var m = WA.waAcc(cands[i], null, accs);
+          if (m && m.amb) amb = true; else if (m) id = m.id;
+        }
+      }
+      if (amb) { bad.push('⚠️ Nama "' + name.join(' ') + '" cocok dengan lebih dari satu rekening, tulis lebih lengkap.'); return; }
+      if (!id) { bad.push('⚠️ Rekening "' + name.join(' ') + '" tidak ditemukan.'); return; }
+      if (!Object.prototype.hasOwnProperty.call(targets, id)) order.push(id);
+      targets[id] = amount;
+    });
+
+    var jobs = [], out = [];
+    order.forEach(function (id) {
+      var cur = id === WA.KAS ? c.kas : (c.bal[id] || 0), now = targets[id], d = now - cur;
+      var nm = id === WA.KAS ? 'Uang tunai laci' : accName(accs, id);
+      if (!d) { out.push('• ' + nm + ': ' + rp(now) + ' (sudah sesuai)'); return; }
+      if (id === WA.KAS) jobs.push(db.doc(P(sid, 'settings/main')).set({ kasAwal: kasAwal + d, example: false }, { merge: true }));
+      else {
+        var acc = accs.filter(function (a) { return a.id === id; })[0];
+        jobs.push(db.doc(P(sid, 'acc/' + id)).update({ opening: (+acc.opening || 0) + d, example: false }));
+      }
+      out.push('• ' + nm + ': ' + rp(cur) + ' → ' + rp(now) + ' (' + rpS(d) + ')');
+    });
+    return Promise.all(jobs).then(function () {
+      var head = order.length ? (bad.length ? '⚠️ ' : '✅ ') + '*Koreksi saldo' + (judul && judul.indexOf('Saldo ') === 0 ? ' ' + judul.slice(6) : '') + '*' : '⚠️ *Tidak ada yang dikoreksi*';
+      var L = [head].concat(out);
+      if (bad.length) L.push('', bad.join('\n'));
+      if (order.length) L.push('', 'Salah angka? Kirim ulang dengan angka yang benar, hasilnya langsung diganti.');
+      return L.join('\n');
+    });
+  });
+}
 
 /* ---------- transaksi hari ini ---------- */
 var TODAY_RE = /^(cek\s+)?transaksi(\s+hari\s*ini)?\s*$/i;
@@ -413,12 +495,24 @@ async function handleMessage(sock, msg) {
     return;
   }
 
+  if (KOREKSI_RE.test(text)) {
+    try {
+      var txk = await koreksiSaldo(sid, text, judul);
+      await refreshAccs(sid);
+      await sock.sendMessage(jid, { text: txk }, { quoted: msg });
+      console.log(new Date().toLocaleString('id-ID'), '-', tag + 'koreksi saldo.');
+    } catch (e) {
+      await sock.sendMessage(jid, { text: '⚠️ Gagal mengoreksi saldo: ' + e.message }, { quoted: msg });
+    }
+    return;
+  }
+
   var accs = await refreshAccs(sid);
   var lines = WA.splitLines(text);
 
   /* satu pesan = satu transaksi (cara lama, balasan lengkap) */
   if (lines.length === 1) {
-    var r = waLine(lines[0], null, accs);
+    var r = waLine(lines[0], null, accs, settingsByShop[sid]);
     if (r.skip) return;                         /* bukan baris transaksi, abaikan diam-diam */
     var sig = 'bot:' + msg.key.id;
     if (!r.ok) {
@@ -435,7 +529,7 @@ async function handleMessage(sock, msg) {
 
   /* banyak baris = banyak transaksi sekaligus */
   var MAX_LINES = 30;
-  var parsed = lines.slice(0, MAX_LINES).map(function (ln) { return { ln: ln, r: waLine(ln, null, accs) }; });
+  var parsed = lines.slice(0, MAX_LINES).map(function (ln) { return { ln: ln, r: waLine(ln, null, accs, settingsByShop[sid]) }; });
   if (parsed.every(function (x) { return x.r.skip; })) return;   /* obrolan biasa, abaikan */
   var out = [], okN = 0, badN = 0;
   for (var k = 0; k < parsed.length; k++) {

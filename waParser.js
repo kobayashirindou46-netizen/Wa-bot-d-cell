@@ -174,7 +174,14 @@ function splitLines(text) {
 }
 
 /* raw: teks pesan apa adanya (tanpa header waktu/nama, beda dari file ekspor chat) */
-function waLine0(raw, defDate, accs) {
+/* tarif otomatis (disimpan pemilik di pengaturan aplikasi): batas nominal -> biaya, sama seperti isian otomatis di formulir aplikasi */
+function tierFee(list, a) {
+  if (!Array.isArray(list) || !list.length) return 0;
+  for (var i = 0; i < list.length; i++) if (list[i].max == null || a <= list[i].max) return +list[i].fee || 0;
+  return +list[list.length - 1].fee || 0;
+}
+
+function waLine0(raw, defDate, accs, settings) {
   var text = raw, date = null;
   var toks = text.split(/\s+/).filter(Boolean);
   var type = toks.length ? WA_TYPES[toks[0].toLowerCase().replace(/[^a-z]/g, '')] : null;
@@ -182,7 +189,7 @@ function waLine0(raw, defDate, accs) {
   var T = type === 'pindah' ? null : TYPES[type];
   var i = 1, amount = null, fee = 0, kom = 0, bf = 0, modal = 0, bt = '', rek = '', adm = null,
       accIds = [], name = [], err = null, low, v, tok, ew = null, hp = '';
-  var ewSrc = false, ewSrcDone = false, pay = null, payAcc = '', payWait = false;
+  var feeSet = false, bfSet = false, ewSrc = false, ewSrcDone = false, pay = null, payAcc = '', payWait = false;
   if (type === 'topup') {
     var nb = false, ne = 0;
     toks.slice(1).forEach(function (t0) {
@@ -201,7 +208,7 @@ function waLine0(raw, defDate, accs) {
       v = i + 1 < toks.length ? waAmount(toks[i + 1]) : null;
       if (v == null) { err = 'nilai'; break; }
       if (low === 'komisi' || low === 'kom') kom = v; else if (low === 'modal') modal = v;
-      else if (low === 'pot' || low === 'potongan' || low === 'pajak') bf = v; else fee = v;
+      else if (low === 'pot' || low === 'potongan' || low === 'pajak') { bf = v; bfSet = true; } else { fee = v; feeSet = true; }
       i++; continue;
     }
     if (lk(type) === 'tarik' && ADM[low]) { adm = low; continue; }
@@ -253,7 +260,17 @@ function waLine0(raw, defDate, accs) {
     name.push(tok.replace(/[,;]+$/, ''));
   }
   if (err) return { ok: false, msg: 'Pesan tidak bisa dibaca (' + err + ').' };
-  if (!amount) return { ok: false, msg: 'Nominal tidak ditemukan.' };
+  if (T && T.onlyAdm) {
+    /* Kartu ATM nasabah: yang dicatat hanya biaya admin yang masuk laci ("kartu 5000" atau "kartu admin 5000"), tanpa nominal */
+    if (!fee && amount) { fee = amount; feeSet = true; }
+    amount = 0;
+    if (!fee) return { ok: false, msg: 'Tulis biaya admin kartu, misalnya "kartu admin 5000".' };
+  } else if (!amount) return { ok: false, msg: 'Nominal tidak ditemukan.' };
+  /* admin / potongan bank tidak ditulis -> pakai tarif otomatis dari pengaturan aplikasi (seperti di formulir) */
+  if (T && T.fee && !T.onlyAdm && settings) {
+    if (!feeSet) fee = tierFee(settings.admTiers, amount);
+    if (!bfSet) bf = tierFee(settings.bfTiers, amount);
+  }
   date = date || defDate || today();
   if (type === 'pindah') {
     if (accIds.length < 2) return { ok: false, msg: 'Tulis dua rekening, asal lalu tujuan.' };
@@ -261,6 +278,7 @@ function waLine0(raw, defDate, accs) {
     return { ok: true, kind: 'mv', obj: { date: date, type: 'pindah', from: accIds[0], to: accIds[1], amount: amount, fee: fee, note: "Dari WhatsApp (otomatis)" } };
   }
   var t = { date: date, type: type, name: name.join(' '), amount: amount, fee: T.fee ? fee : 0, komisi: T.fee ? kom : 0, bf: T.fee ? bf : 0, acc: '', note: "Dari WhatsApp (otomatis)" };
+  if (T.onlyAdm) { t.acc = KAS; t.adm = 'luar'; }
   if (T.modal) t.modal = modal;
   if (T.pay) {
     t.pay = pay || 'cash';
@@ -383,10 +401,10 @@ function reorder(text, accs) {
   return { text: out.join(' '), changed: changed };
 }
 
-function waLine(raw, defDate, accs) {
+function waLine(raw, defDate, accs, settings) {
   var text = normalizeRaw(raw);
   var ro = reorder(text, accs || []);
-  var r = waLine0(ro.text, defDate, accs);
+  var r = waLine0(ro.text, defDate, accs, settings);
   if (ro.changed && !r.skip) { r.note = ro.text; text = ro.text; }
   var toks = text.split(/\s+/).filter(Boolean);
   var first = toks.length ? toks[0].toLowerCase().replace(/[^a-z]/g, '') : '';
@@ -406,4 +424,4 @@ function waLine(raw, defDate, accs) {
   return r;
 }
 
-module.exports = { waLine: waLine, TYPES: TYPES, ADM: ADM, waNorm: waNorm, lk: lk, fx: fx, calcBalance: calcBalance, splitLines: splitLines };
+module.exports = { waAcc: waAcc, waAmount: waAmount, KAS: KAS, waLine: waLine, TYPES: TYPES, ADM: ADM, waNorm: waNorm, lk: lk, fx: fx, calcBalance: calcBalance, splitLines: splitLines };
