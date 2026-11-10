@@ -267,10 +267,26 @@ function todayText(sid) {
 }
 
 /* ---------- bot WhatsApp ---------- */
+var curSock = null, tokoLoaded = false, reconnTimer = null;
+process.on('unhandledRejection', function (e) { console.error('[PERINGATAN] Error tidak tertangkap:', e && e.message ? e.message : e); });
+process.on('uncaughtException', function (e) { console.error('[PERINGATAN] Error:', e && e.message ? e.message : e); });
+function scheduleReconnect(ms) {
+  if (reconnTimer) return;                      /* cegah banyak sambungan menumpuk */
+  reconnTimer = setTimeout(function () {
+    reconnTimer = null;
+    start().catch(function (e) { console.error('Gagal menyambung ulang:', e && e.message ? e.message : e); scheduleReconnect(10000); });
+  }, ms);
+}
 async function start() {
+  /* tutup sambungan lama dulu supaya tidak ada dua sambungan dengan sesi yang sama */
+  if (curSock) {
+    try { curSock.ev.removeAllListeners(); } catch (e) {}
+    try { curSock.end(undefined); } catch (e) {}
+    curSock = null;
+  }
   await resolveShopId();
   await refreshAccs(ownShopId);
-  await loadToko();
+  if (!tokoLoaded) { await loadToko(); tokoLoaded = true; }
   var auth = await useMultiFileAuthState(SESSION_DIR);
   var state = auth.state, saveCreds = auth.saveCreds;
   var ver = (await fetchLatestBaileysVersion()).version;
@@ -283,6 +299,7 @@ async function start() {
     browser: ['Buku Kas D\'Cell Bot', 'Chrome', '1.0']
   });
 
+  curSock = sock;
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', function (u) {
@@ -291,10 +308,19 @@ async function start() {
       qrcode.generate(u.qr, { small: true });
     }
     if (u.connection === 'close') {
-      var code = u.lastDisconnect && u.lastDisconnect.error && u.lastDisconnect.error.output && u.lastDisconnect.error.output.statusCode;
+      var err = u.lastDisconnect && u.lastDisconnect.error;
+      var code = err && err.output && err.output.statusCode;
       var loggedOut = code === DisconnectReason.loggedOut;
-      console.log('Koneksi WhatsApp terputus.', loggedOut ? 'Sesi keluar, hapus folder session lalu scan ulang.' : 'Menyambung ulang...');
-      if (!loggedOut) setTimeout(start, 3000);
+      var replaced = code === DisconnectReason.connectionReplaced;
+      console.log('Koneksi WhatsApp terputus. Kode:', code, '|', (err && err.message) || '-');
+      if (loggedOut) {
+        console.log('Sesi keluar. Hapus folder session lalu scan ulang: rm -rf session');
+      } else if (replaced) {
+        console.log('SESI DIPAKAI DI TEMPAT LAIN (kode 440). Kemungkinan ada bot kedua yang masih jalan. Jalankan: pkill -f index.js lalu start ulang SATU saja. Mencoba lagi 30 detik...');
+        scheduleReconnect(30000);
+      } else {
+        scheduleReconnect(code === 428 || code === 408 ? 8000 : 3000);
+      }
     } else if (u.connection === 'open') {
       console.log('\n✅ Tersambung ke WhatsApp. Bot siap mencatat transaksi.\n');
     }
