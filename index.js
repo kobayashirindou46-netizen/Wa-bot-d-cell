@@ -150,6 +150,17 @@ function tgl(d) {
 }
 var ADM_LABEL = { luar: 'nasabah bayar tunai', dalam: 'transfer + admin', potong: 'potong dari uang' };
 
+/* kembalian untuk pelanggan yang bayar tunai ke laci: "terima 100rb" di pesan (hanya info, tidak disimpan) */
+function kembalianText(o, terima, accs) {
+  if (!terima) return '';
+  var due;
+  if (WA.lk(o.type) === 'tarik') due = (o.adm || 'luar') === 'luar' ? (+o.fee || 0) : 0;   /* tarik/kartu: yang dibayar tunai hanya admin */
+  else due = (o.pay === 'transfer' && o.payAcc) ? 0 : WA.fx(o, accs).kas;
+  if (!(due > 0)) return '';
+  var d = terima - due;
+  return '• Pelanggan bayar ' + rp(due) + ', diterima ' + rp(terima) + (d >= 0 ? ' → *Kembalian ' + rp(d) + '*' : ' → *kurang ' + rp(-d) + '*');
+}
+
 /* satu baris per rincian, hanya tampilkan yang relevan -- supaya balasan rapi dan ringkas */
 function successText(r, accs) {
   if (r.kind === 'mv') {
@@ -174,6 +185,8 @@ function successText(r, accs) {
   if (o2.bf) L2.push('• Potongan bank: ' + rp(o2.bf));
   if (T.modal && o2.modal) L2.push('• Modal: ' + rp(o2.modal));
   if (T.pay) L2.push('• Pelanggan bayar: ' + (o2.pay === 'transfer' ? 'transfer ke ' + accName(accs, o2.payAcc) : 'tunai'));
+  var kbl = kembalianText(o2, r.terima, accs);
+  if (kbl) L2.push(kbl);
   L2.push('• Tanggal: ' + tgl(o2.date));
   return L2.join('\n');
 }

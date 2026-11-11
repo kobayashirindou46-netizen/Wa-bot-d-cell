@@ -189,7 +189,7 @@ function waLine0(raw, defDate, accs, settings) {
   var T = type === 'pindah' ? null : TYPES[type];
   var i = 1, amount = null, fee = 0, kom = 0, bf = 0, modal = 0, bt = '', rek = '', adm = null,
       accIds = [], name = [], err = null, low, v, tok, ew = null, hp = '';
-  var feeSet = false, bfSet = false, ewSrc = false, ewSrcDone = false, pay = null, payAcc = '', payWait = false;
+  var recv = null, feeSet = false, bfSet = false, ewSrc = false, ewSrcDone = false, pay = null, payAcc = '', payWait = false;
   if (type === 'topup') {
     var nb = false, ne = 0;
     toks.slice(1).forEach(function (t0) {
@@ -211,6 +211,8 @@ function waLine0(raw, defDate, accs, settings) {
       else if (low === 'pot' || low === 'potongan' || low === 'pajak') { bf = v; bfSet = true; } else { fee = v; feeSet = true; }
       i++; continue;
     }
+    /* uang yang diterima dari pelanggan, hanya untuk menghitung kembalian di balasan (tidak disimpan) */
+    if ((low === 'terima' || low === 'diterima') && i + 1 < toks.length && waAmount(toks[i + 1]) != null) { recv = waAmount(toks[i + 1]); i++; continue; }
     if (lk(type) === 'tarik' && ADM[low]) { adm = low; continue; }
     /* cara bayar pelanggan: cash/tunai, atau tf/trf/transfer lalu (boleh) nama rekening tujuan */
     if (T && T.pay) {
@@ -310,7 +312,7 @@ function waLine0(raw, defDate, accs, settings) {
     if (t.adm === 'potong' && t.fee > t.amount) return { ok: false, msg: 'Biaya admin lebih besar dari nominal.' };
   }
   if (lk(type) === 'keluar' && !t.name) return { ok: false, msg: 'Tulis keperluan pengeluaran, misalnya "keluar 150rb pulsa".' };
-  return { ok: true, kind: 'tx', obj: t };
+  return { ok: true, kind: 'tx', obj: t, terima: recv };
 }
 
 
