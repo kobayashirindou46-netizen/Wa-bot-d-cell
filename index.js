@@ -91,7 +91,7 @@ function P(sid, p) { return 'shops/' + sid + '/' + p; }
 /* ---------- toko lain (toko.json) ----------
    Tiap toko lain = satu akun pemilik di aplikasi yang sama (daftar sendiri di aplikasi).
    Bot mengenali pemiliknya lewat nomor WhatsApp, lalu mencatat ke data toko itu saja. */
-var tokoIndex = TOKO.buildIndex([]);
+var tokoIndex = TOKO.buildIndex([]), tokoList = [];
 var unknownSeen = {};
 async function loadToko() {
   var list = readTokoFile().list;
@@ -106,11 +106,12 @@ async function loadToko() {
         sid = await shopByEmail(t.email);
       }
       if (!TOKO.normNum(t.nomor) && !t.lid) throw new Error('isi "nomor"');
-      ok.push({ nama: t.nama || t.email || sid, nomor: t.nomor, lid: t.lid, shopId: sid });
+      ok.push({ nama: t.nama || t.email || sid, nomor: t.nomor, lid: t.lid, shopId: sid, rekapJam: t.rekapJam });
       console.log('Toko terdaftar:', t.nama || t.email, '(' + TOKO.normNum(t.nomor) + ')');
     } catch (e) { console.error('[PERINGATAN] Toko #' + (k + 1) + ' dilewati:', e.message); }
   }
   tokoIndex = TOKO.buildIndex(ok);
+  tokoList = ok;
 }
 
 var accsByShop = {}, settingsByShop = {};
@@ -239,9 +240,11 @@ function saldoText(sid, judul) {
     var L = ['💰 *' + judul + '*'];
     L.push('_per ' + pad2(now.getDate()) + '-' + pad2(now.getMonth() + 1) + '-' + now.getFullYear() + ' ' + pad2(now.getHours()) + ':' + pad2(now.getMinutes()) + '_');
     L.push('');
-    L.push('• Uang tunai laci: ' + rp(c.kas));
+    var ms = (settingsByShop[sid] && settingsByShop[sid].minSaldo) || {};
+    function low(id, v) { return (+ms[id] > 0 && v < +ms[id]) ? ' ⚠️ menipis (batas ' + rp(ms[id]) + ')' : ''; }
+    L.push('• Uang tunai laci: ' + rp(c.kas) + low('kas', c.kas));
     accs.slice().sort(function (a, b) { return (a.createdAt || 0) - (b.createdAt || 0); }).forEach(function (a) {
-      L.push('• ' + a.name + ': ' + rp(c.bal[a.id]));
+      L.push('• ' + a.name + ': ' + rp(c.bal[a.id]) + low(a.id, c.bal[a.id]));
     });
     L.push('');
     L.push('*Total aset: ' + rp(c.total) + '*');
@@ -331,6 +334,128 @@ function koreksiSaldo(sid, text, judul) {
   });
 }
 
+/* ---------- peringatan saldo menipis (hanya bila batasnya diatur di aplikasi) ---------- */
+function lowWarn(sid) {
+  var ms = (settingsByShop[sid] && settingsByShop[sid].minSaldo) || {};
+  if (!Object.keys(ms).some(function (k) { return +ms[k] > 0; })) return Promise.resolve('');
+  return Promise.all([
+    db.collection(P(sid, 'acc')).get(), db.collection(P(sid, 'tx')).get(), db.collection(P(sid, 'mv')).get(),
+    db.doc(P(sid, 'settings/main')).get()
+  ]).then(function (r) {
+    var accs = r[0].docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
+    var kasAwal = r[3].exists ? (+r[3].data().kasAwal || 0) : 0;
+    var c = WA.calcBalance(accs, kasAwal, r[1].docs.map(function (d) { return d.data(); }), r[2].docs.map(function (d) { return d.data(); }));
+    var L = [];
+    Object.keys(ms).forEach(function (k) {
+      var lim = +ms[k]; if (!(lim > 0)) return;
+      var v = k === 'kas' ? c.kas : c.bal[k]; if (v === undefined) return;
+      if (v < lim) L.push('• ' + accName(accs, k) + ': ' + rp(v) + ' (batas ' + rp(lim) + ')');
+    });
+    return L.length ? '⚠️ *Saldo menipis, segera isi:*\n' + L.join('\n') : '';
+  }).catch(function () { return ''; });
+}
+
+/* ---------- hapus / ubah transaksi terakhir yang dicatat bot ---------- */
+var HAPUS_RE = /^(hapus|batal|batalkan)\s+(transaksi\s+)?terakhir\s*$/i;
+var UBAH_RE = /^(ubah|edit|ganti)\s+(transaksi\s+)?terakhir\b/i;
+function lastBotDoc(sid) {
+  return Promise.all(['tx', 'mv'].map(function (c) {
+    return db.collection(P(sid, c)).orderBy('createdAt', 'desc').limit(15).get().then(function (snap) {
+      return snap.docs.filter(function (d) { var w = d.data().wa; return typeof w === 'string' && w.indexOf('bot:') === 0; })
+        .map(function (d) { return { ref: d.ref, col: c, data: d.data() }; });
+    });
+  })).then(function (r) {
+    var all = r[0].concat(r[1]);
+    all.sort(function (a, b) { return (b.data.createdAt || 0) - (a.data.createdAt || 0); });
+    return all[0] || null;
+  });
+}
+function describeDoc(d, accs) {
+  var o = d.data;
+  if (d.col === 'mv') return 'Pindah saldo ' + rp(o.amount) + ' dari ' + accName(accs, o.from) + ' ke ' + accName(accs, o.to) + (o.fee ? ', fee ' + rp(o.fee) : '');
+  var T = TYPES[o.type] || {};
+  return (T.label || o.type) + (T.onlyAdm ? ' admin ' + rp(o.fee) : ' ' + rp(o.amount)) + (!T.onlyAdm && o.fee ? ', admin ' + rp(o.fee) : '') + (o.name ? ' (' + o.name + ')' : '') + ' · ' + tgl(o.date);
+}
+function hapusTerakhir(sid) {
+  return lastBotDoc(sid).then(function (d) {
+    if (!d) return 'Tidak ada transaksi dari bot yang bisa dihapus.';
+    return refreshAccs(sid).then(function (accs) {
+      return d.ref.delete().then(function () { return '🗑️ *Transaksi terakhir dihapus*\n• ' + describeDoc(d, accs) + '\n\nSalah hapus? Kirim ulang pesan transaksinya.'; });
+    });
+  });
+}
+function ubahTerakhir(sid, text) {
+  var rest = text.replace(UBAH_RE, '').trim();
+  var EX = 'Contoh: ubah terakhir admin 3000\nubah terakhir nominal 150rb\nubah terakhir tf bri\nubah terakhir cash';
+  if (!rest) return Promise.resolve('Tulis apa yang diubah.\n' + EX);
+  return Promise.all([lastBotDoc(sid), refreshAccs(sid)]).then(function (r) {
+    var d = r[0], accs = r[1];
+    if (!d) return 'Tidak ada transaksi dari bot yang bisa diubah.';
+    if (d.col === 'mv') return 'Pindah saldo tidak bisa diubah. Kirim "hapus terakhir" lalu kirim ulang pesan yang benar.';
+    var o = d.data, T = TYPES[o.type] || {}, toks = rest.split(/\s+/), upd = {}, ch = [], err = '';
+    for (var i = 0; i < toks.length && !err; i++) {
+      var w = toks[i].toLowerCase();
+      var nextAmt = i + 1 < toks.length ? WA.waAmount(toks[i + 1]) : null;
+      if (w === 'admin' || w === 'adm' || w === 'fee') { if (nextAmt == null) err = 'Nilai admin belum ditulis.'; else { upd.fee = nextAmt; ch.push('Admin: ' + rp(o.fee) + ' → ' + rp(nextAmt)); i++; } }
+      else if (w === 'komisi' || w === 'kom') { if (nextAmt == null) err = 'Nilai komisi belum ditulis.'; else { upd.komisi = nextAmt; ch.push('Komisi: ' + rp(o.komisi) + ' → ' + rp(nextAmt)); i++; } }
+      else if (w === 'pot' || w === 'potongan') { if (nextAmt == null) err = 'Nilai potongan belum ditulis.'; else { upd.bf = nextAmt; ch.push('Potongan bank: ' + rp(o.bf) + ' → ' + rp(nextAmt)); i++; } }
+      else if (w === 'nominal' || w === 'jumlah') { if (nextAmt == null) err = 'Nominal belum ditulis.'; else if (T.onlyAdm) err = 'Kartu ATM tidak punya nominal. Ubah adminnya.'; else { upd.amount = nextAmt; ch.push('Nominal: ' + rp(o.amount) + ' → ' + rp(nextAmt)); i++; } }
+      else if (w === 'cash' || w === 'tunai') { if (!T.pay) err = 'Jenis ini tidak punya pilihan cash/transfer.'; else { upd.pay = 'cash'; upd.payAcc = admin.firestore.FieldValue.delete(); ch.push('Pelanggan bayar: tunai (cash)'); } }
+      else if (w === 'tf' || w === 'trf' || w === 'transfer') {
+        if (!T.pay) { err = 'Jenis ini tidak punya pilihan cash/transfer.'; break; }
+        var ra = i + 1 < toks.length ? WA.waAcc(toks[i + 1].toLowerCase(), null, accs) : null;
+        if (ra && ra.amb) { err = 'Nama rekening cocok dengan lebih dari satu rekening.'; break; }
+        var pid = ra ? ra.id : null; if (ra) i++;
+        if (!pid) { var pl = accs.filter(function (a) { return a.kind === 'bank' || a.kind === 'ewallet'; }); if (pl.length === 1) pid = pl[0].id; }
+        if (!pid) err = 'Tulis rekening tujuan transfer, misalnya "ubah terakhir tf bri".';
+        else { upd.pay = 'transfer'; upd.payAcc = pid; ch.push('Pelanggan bayar: transfer ke ' + accName(accs, pid)); }
+      }
+      else err = 'Bagian "' + toks[i] + '" tidak dikenali.';
+    }
+    if (err) return '⚠️ ' + err + '\n' + EX;
+    if (!ch.length) return '⚠️ Tidak ada yang diubah.\n' + EX;
+    return d.ref.update(upd).then(function () { return '✅ *Transaksi terakhir diubah*\n• ' + describeDoc(d, accs) + '\n' + ch.map(function (x) { return '• ' + x; }).join('\n'); });
+  });
+}
+
+/* ---------- rekap harian otomatis ---------- */
+var REKAP_PATH = path.join(ROOT, 'rekap-state.json');
+function readRekapState() { try { return JSON.parse(fs.readFileSync(REKAP_PATH, 'utf8')) || {}; } catch (e) { return {}; } }
+function writeRekapState(st) { try { fs.writeFileSync(REKAP_PATH, JSON.stringify(st)); } catch (e) { console.error('[PERINGATAN] rekap-state.json tidak bisa ditulis:', e.message); } }
+function rekapTargets() {
+  var out = [], u = readTokoFile().utama, jamU = (u && u.rekapJam !== undefined) ? u.rekapJam : 23;
+  if (ownShopId && jamU !== false && jamU !== null && !isNaN(+jamU) && curSock && curSock.user && curSock.user.id) {
+    var me = String(curSock.user.id).split(':')[0].split('@')[0];
+    out.push({ sid: ownShopId, jid: me + '@s.whatsapp.net', jam: +jamU, nama: 'Toko utama' });
+  }
+  tokoList.forEach(function (t) {
+    if (t.rekapJam === undefined || t.rekapJam === null || t.rekapJam === false || isNaN(+t.rekapJam)) return;
+    var n = TOKO.normNum(t.nomor); if (!n) return;
+    out.push({ sid: t.shopId, jid: n + '@s.whatsapp.net', jam: +t.rekapJam, nama: t.nama });
+  });
+  return out;
+}
+var rekapBusy = false;
+function cekRekap() {
+  if (rekapBusy || !curSock) return;
+  var now = new Date(), today = todayStr(), st = readRekapState(), list = rekapTargets();
+  var due = list.filter(function (t) { return now.getHours() >= t.jam && st[t.sid + '|' + t.jid] !== today; });
+  if (!due.length) return;
+  rekapBusy = true;
+  var sock = curSock;
+  due.reduce(function (p, t) {
+    return p.then(function () {
+      return refreshAccs(t.sid).then(function () { return Promise.all([todayText(t.sid), saldoText(t.sid, 'Saldo ' + t.nama)]); }).then(function (r) {
+        return lowWarn(t.sid).then(function (w) {
+          return sock.sendMessage(t.jid, { text: '🌙 *Rekap harian ' + t.nama + '*\n\n' + r[0] + '\n\n' + r[1] + (w ? '\n\n' + w : '') });
+        });
+      }).then(function () { st[t.sid + '|' + t.jid] = today; writeRekapState(st); console.log(new Date().toLocaleString('id-ID'), '- rekap harian terkirim ke', t.nama); })
+        .catch(function (e) { console.error('[PERINGATAN] Rekap harian ' + t.nama + ' gagal:', e && e.message ? e.message : e); });
+    });
+  }, Promise.resolve()).then(function () { rekapBusy = false; }, function () { rekapBusy = false; });
+}
+var rekapTimer = null;
+
 /* ---------- transaksi hari ini ---------- */
 var TODAY_RE = /^(cek\s+)?transaksi(\s+hari\s*ini)?\s*$/i;
 function todayText(sid) {
@@ -343,13 +468,14 @@ function todayText(sid) {
     var mvs = r[1].docs.map(function (d) { return d.data(); });
     /* sama dengan kartu "Transaksi hari ini" di aplikasi: pemasukan dan pengeluaran
        bukan transaksi layanan, jadi tidak ikut dihitung di jumlah transaksi */
-    var n = 0, keluar = 0, masuk = 0, laba = 0, byType = {};
+    var n = 0, keluar = 0, masuk = 0, laba = 0, omzet = 0, byType = {};
     txs.forEach(function (x) {
       var e = WA.fx(x, accsByShop[sid] || []), ly = WA.lk(x.type);
       laba += e.laba;
       if (ly === 'keluar') { keluar += +x.amount || 0; return; }
       if (ly === 'masuk') { masuk += +x.amount || 0; return; }
       n++;
+      if (ly !== 'isi' && ly !== 'jual') omzet += +x.amount || 0;
       var label = (TYPES[x.type] || {}).label || x.type;
       byType[label] = (byType[label] || 0) + 1;
     });
@@ -360,6 +486,7 @@ function todayText(sid) {
     L.push('');
     L.push('• Jumlah transaksi: ' + n + (mvs.length ? ' (+ ' + mvs.length + ' pindah saldo)' : ''));
     if (masuk) L.push('• Pemasukan: ' + rp(masuk));
+    L.push('• Omzet: ' + rp(omzet));
     L.push('• Pengeluaran: ' + rp(keluar));
     L.push('• Laba: ' + rp(laba));
     var types = Object.keys(byType);
@@ -435,6 +562,7 @@ async function start() {
       }
     } else if (u.connection === 'open') {
       console.log('\n✅ Tersambung ke WhatsApp. Bot siap mencatat transaksi.\n');
+      if (!rekapTimer) { rekapTimer = setInterval(cekRekap, 60000); setTimeout(cekRekap, 15000); }
     }
   });
 
@@ -483,6 +611,7 @@ async function handleMessage(sock, msg) {
   var text = (m && (m.conversation || (m.extendedTextMessage && m.extendedTextMessage.text))) || '';
   text = text.trim();
   if (!text) return;
+  if (/^(🌙|💰|📊|✅|⚠️|🗑️|🛠️)/.test(text)) return;   /* balasan/rekap dari bot sendiri, jangan dibaca sebagai transaksi */
   var tag = toko ? '[' + toko.nama + '] ' : '';
 
   if (SALDO_RE.test(text)) {
@@ -504,6 +633,17 @@ async function handleMessage(sock, msg) {
       console.log(new Date().toLocaleString('id-ID'), '-', tag + 'cek transaksi hari ini diminta.');
     } catch (e) {
       await sock.sendMessage(jid, { text: '⚠️ Gagal mengambil data transaksi: ' + e.message }, { quoted: msg });
+    }
+    return;
+  }
+
+  if (HAPUS_RE.test(text) || UBAH_RE.test(text)) {
+    try {
+      var txh = HAPUS_RE.test(text) ? await hapusTerakhir(sid) : await ubahTerakhir(sid, text);
+      await sock.sendMessage(jid, { text: txh }, { quoted: msg });
+      console.log(new Date().toLocaleString('id-ID'), '-', tag + (HAPUS_RE.test(text) ? 'hapus terakhir.' : 'ubah terakhir.'));
+    } catch (e) {
+      await sock.sendMessage(jid, { text: '⚠️ Gagal: ' + e.message }, { quoted: msg });
     }
     return;
   }
@@ -535,6 +675,7 @@ async function handleMessage(sock, msg) {
     if (await alreadyProcessed(sid, sig)) return;
     await saveTx(sid, r.kind, r.obj, sig);
     var reply = successText(r, accs) + (r.note ? '\n\nℹ️ Urutan pesan dikoreksi: ' + r.note : '');
+    var lw1 = await lowWarn(sid); if (lw1) reply += '\n\n' + lw1;
     await sock.sendMessage(jid, { text: reply }, { quoted: msg });
     console.log(new Date().toLocaleString('id-ID'), '-', tag + reply.replace(/\n/g, ' | ').replace(/^✅\s*/, ''));
     return;
@@ -558,6 +699,7 @@ async function handleMessage(sock, msg) {
   if (lines.length > MAX_LINES) out.push('⚠️ Hanya ' + MAX_LINES + ' baris pertama yang diproses. Kirim sisanya di pesan lain.');
   var head = okN + ' dari ' + parsed.length + ' transaksi tercatat' + (badN ? ', ' + badN + ' perlu dicek' : '');
   var reply2 = (badN ? '⚠️ ' : '✅ ') + '*' + head + '*\n' + out.join('\n');
+  if (okN) { var lw2 = await lowWarn(sid); if (lw2) reply2 += '\n\n' + lw2; }
   await sock.sendMessage(jid, { text: reply2 }, { quoted: msg });
   console.log(new Date().toLocaleString('id-ID'), '-', tag + head);
 }
