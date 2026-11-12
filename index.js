@@ -133,8 +133,26 @@ function alreadyProcessed(sid, sig) {
 function saveTx(sid, kind, obj, sig) {
   obj.wa = sig;
   obj.createdAt = Date.now();
-  return db.collection(P(sid, kind === 'mv' ? 'mv' : 'tx')).add(obj);
+  return db.collection(P(sid, kind === 'mv' ? 'mv' : 'tx')).add(obj).then(function (ref) {
+    /* bayar "utang": buat catatan piutang yang terhubung ke transaksi ini */
+    if (kind !== 'mv' && obj.pay === 'utang') {
+      var dv = WA.debtFor(obj, accsByShop[sid] || []);
+      if (dv) {
+        return db.collection(P(sid, 'debts')).add({ kind: dv.kind, name: obj.name || '', hp: obj.hp || '', amount: dv.amount, date: obj.date, due: '', note: (TYPES[obj.type] || {}).label || '', acc: 'none', txId: ref.id, pays: [], createdAt: Date.now(), wa: sig }).then(function () { return ref; });
+      }
+    }
+    return ref;
+  });
 }
+
+/* ---------- utang piutang ---------- */
+function getDebts(sid) {
+  return db.collection(P(sid, 'debts')).get().then(function (snap) {
+    return snap.docs.map(function (d) { return Object.assign({ id: d.id, ref: d.ref }, d.data()); });
+  }).catch(function () { return []; });
+}
+function debtPaid(d) { return (d.pays || []).reduce(function (a, p) { return a + (+p.amount || 0); }, 0); }
+function debtLeft(d) { return Math.max(0, (+d.amount || 0) - debtPaid(d)); }
 
 /* ---------- format balasan ---------- */
 var nf = new Intl.NumberFormat('id-ID');
@@ -185,7 +203,7 @@ function successText(r, accs) {
   if (o2.komisi) L2.push('• Komisi: ' + rp(o2.komisi));
   if (o2.bf) L2.push('• Potongan bank: ' + rp(o2.bf));
   if (T.modal && o2.modal) L2.push('• Modal: ' + rp(o2.modal));
-  if (T.pay) L2.push('• Pelanggan bayar: ' + (o2.pay === 'transfer' ? 'transfer ke ' + accName(accs, o2.payAcc) : 'tunai'));
+  if (T.pay || o2.pay === 'utang') L2.push('• Pelanggan bayar: ' + (o2.pay === 'utang' ? 'BELUM (dicatat di utang piutang)' : o2.pay === 'transfer' ? 'transfer ke ' + accName(accs, o2.payAcc) : 'tunai'));
   var kbl = kembalianText(o2, r.terima, accs);
   if (kbl) L2.push(kbl);
   L2.push('• Tanggal: ' + tgl(o2.date));
@@ -228,14 +246,15 @@ function saldoText(sid, judul) {
     db.collection(P(sid, 'acc')).get(),
     db.collection(P(sid, 'tx')).get(),
     db.collection(P(sid, 'mv')).get(),
-    db.doc(P(sid, 'settings/main')).get()
+    db.doc(P(sid, 'settings/main')).get(),
+    getDebts(sid)
   ]).then(function (r) {
     var accs = r[0].docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
     var txs = r[1].docs.map(function (d) { return d.data(); });
     var mvs = r[2].docs.map(function (d) { return d.data(); });
     var kasAwal = r[3].exists ? (+r[3].data().kasAwal || 0) : 0;
     accsByShop[sid] = accs;
-    var c = calcBalance(accs, kasAwal, txs, mvs);
+    var c = calcBalance(accs, kasAwal, txs, mvs, r[4]);
     var now = new Date();
     var L = ['💰 *' + judul + '*'];
     L.push('_per ' + pad2(now.getDate()) + '-' + pad2(now.getMonth() + 1) + '-' + now.getFullYear() + ' ' + pad2(now.getHours()) + ':' + pad2(now.getMinutes()) + '_');
@@ -248,6 +267,9 @@ function saldoText(sid, judul) {
     });
     L.push('');
     L.push('*Total aset: ' + rp(c.total) + '*');
+    var pt = 0, ut = 0;
+    r[4].forEach(function (d) { var l = debtLeft(d); if (d.kind === 'piutang') pt += l; else ut += l; });
+    if (pt || ut) L.push('_Piutang belum dibayar: ' + rp(pt) + ' · Utang kita: ' + rp(ut) + ' (ketik "cek utang")_');
     return L.join('\n');
   });
 }
@@ -267,14 +289,15 @@ function koreksiSaldo(sid, text, judul) {
     db.collection(P(sid, 'acc')).get(),
     db.collection(P(sid, 'tx')).get(),
     db.collection(P(sid, 'mv')).get(),
-    db.doc(P(sid, 'settings/main')).get()
+    db.doc(P(sid, 'settings/main')).get(),
+    getDebts(sid)
   ]).then(function (r) {
     var accs = r[0].docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
     var txs = r[1].docs.map(function (d) { return d.data(); });
     var mvs = r[2].docs.map(function (d) { return d.data(); });
     var kasAwal = r[3].exists ? (+r[3].data().kasAwal || 0) : 0;
     accsByShop[sid] = accs;
-    var c = calcBalance(accs, kasAwal, txs, mvs);
+    var c = calcBalance(accs, kasAwal, txs, mvs, r[4]);
 
     var lines = text.split(/\r?\n/).map(function (l) { return l.replace(KOREKSI_RE, '').trim(); }).filter(Boolean);
     if (!lines.length) {
@@ -340,11 +363,11 @@ function lowWarn(sid) {
   if (!Object.keys(ms).some(function (k) { return +ms[k] > 0; })) return Promise.resolve('');
   return Promise.all([
     db.collection(P(sid, 'acc')).get(), db.collection(P(sid, 'tx')).get(), db.collection(P(sid, 'mv')).get(),
-    db.doc(P(sid, 'settings/main')).get()
+    db.doc(P(sid, 'settings/main')).get(), getDebts(sid)
   ]).then(function (r) {
     var accs = r[0].docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
     var kasAwal = r[3].exists ? (+r[3].data().kasAwal || 0) : 0;
-    var c = WA.calcBalance(accs, kasAwal, r[1].docs.map(function (d) { return d.data(); }), r[2].docs.map(function (d) { return d.data(); }));
+    var c = WA.calcBalance(accs, kasAwal, r[1].docs.map(function (d) { return d.data(); }), r[2].docs.map(function (d) { return d.data(); }), r[4]);
     var L = [];
     Object.keys(ms).forEach(function (k) {
       var lim = +ms[k]; if (!(lim > 0)) return;
@@ -380,7 +403,11 @@ function hapusTerakhir(sid) {
   return lastBotDoc(sid).then(function (d) {
     if (!d) return 'Tidak ada transaksi dari bot yang bisa dihapus.';
     return refreshAccs(sid).then(function (accs) {
-      return d.ref.delete().then(function () { return '🗑️ *Transaksi terakhir dihapus*\n• ' + describeDoc(d, accs) + '\n\nSalah hapus? Kirim ulang pesan transaksinya.'; });
+      var linked = d.col === 'tx' && d.data.pay === 'utang' ? getDebts(sid).then(function (ds) { return ds.filter(function (x) { return x.txId === d.ref.id; })[0] || null; }) : Promise.resolve(null);
+      return linked.then(function (ld) {
+        if (ld && (ld.pays || []).length) return Promise.reject(new Error('piutang transaksi ini sudah dicicil. Hapus dulu lewat menu Utang piutang di aplikasi.'));
+        return d.ref.delete().then(function () { return ld ? ld.ref.delete() : null; });
+      }).then(function () { return '🗑️ *Transaksi terakhir dihapus*\n• ' + describeDoc(d, accs) + '\n\nSalah hapus? Kirim ulang pesan transaksinya.'; });
     });
   });
 }
@@ -391,6 +418,7 @@ function ubahTerakhir(sid, text) {
   return Promise.all([lastBotDoc(sid), refreshAccs(sid)]).then(function (r) {
     var d = r[0], accs = r[1];
     if (!d) return 'Tidak ada transaksi dari bot yang bisa diubah.';
+    if (d.col === 'tx' && d.data.pay === 'utang') return 'Transaksi utang tidak bisa diubah. Kirim "hapus terakhir" lalu kirim ulang pesan yang benar.';
     if (d.col === 'mv') return 'Pindah saldo tidak bisa diubah. Kirim "hapus terakhir" lalu kirim ulang pesan yang benar.';
     var o = d.data, T = TYPES[o.type] || {}, toks = rest.split(/\s+/), upd = {}, ch = [], err = '';
     for (var i = 0; i < toks.length && !err; i++) {
@@ -584,6 +612,115 @@ async function start() {
   });
 }
 
+
+/* ---------- perintah utang piutang lewat WhatsApp ---------- */
+var DEBT_RE = /^(piutang|utang|hutang|daftar\s+(utang|piutang|hutang)|cek\s+(utang|piutang|hutang)|bayar\s+(piutang|utang|hutang)|lunas)\b/i;
+function nrm(x) { return String(x || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function tglPendek(d) { return d ? tgl(d) : ''; }
+function debtList(ds, judul) {
+  var open = ds.filter(function (d) { return debtLeft(d) > 0; });
+  open.sort(function (a, b) { var x = a.due || '9999', y = b.due || '9999'; return x < y ? -1 : x > y ? 1 : 0; });
+  var td = todayStr();
+  function line(d) { return '• ' + (d.name || 'Tanpa nama') + ': ' + rp(debtLeft(d)) + (debtPaid(d) ? ' (dari ' + rp(d.amount) + ')' : '') + (d.due ? ' · tempo ' + tglPendek(d.due) + (d.due < td ? ' ⚠️ terlambat' : '') : ''); }
+  var P1 = open.filter(function (d) { return d.kind === 'piutang'; }), U1 = open.filter(function (d) { return d.kind !== 'piutang'; });
+  var tp = P1.reduce(function (a, d) { return a + debtLeft(d); }, 0), tu = U1.reduce(function (a, d) { return a + debtLeft(d); }, 0);
+  var L = ['📊 *' + judul + '*', ''];
+  if (!open.length) return L.concat(['Tidak ada utang atau piutang yang belum lunas.']).join('\n');
+  if (P1.length) { L.push('*Piutang (belum dibayar ke kita): ' + rp(tp) + '*'); P1.forEach(function (d) { L.push(line(d)); }); L.push(''); }
+  if (U1.length) { L.push('*Utang kita: ' + rp(tu) + '*'); U1.forEach(function (d) { L.push(line(d)); }); L.push(''); }
+  L.push('_Bayar: "bayar piutang budi 50rb"  ·  Lunas: "lunas budi"_');
+  return L.join('\n');
+}
+function findDebt(ds, name, kind) {
+  var q = nrm(name);
+  var pool = ds.filter(function (d) { return debtLeft(d) > 0 && (!kind || (kind === 'piutang') === (d.kind === 'piutang')); });
+  var ex = pool.filter(function (d) { return nrm(d.name) === q; });
+  var hit = ex.length ? ex : pool.filter(function (d) { return q && nrm(d.name).indexOf(q) >= 0; });
+  return hit;
+}
+function pickAccTok(toks, accs) {
+  /* cari kata kunci rekening setelah dari/ke/masuk, atau "tanpa kas". Mengembalikan {acc, rest} */
+  var acc = null, rest = [], bad = null;
+  for (var i = 0; i < toks.length; i++) {
+    var w = toks[i].toLowerCase();
+    if (w === 'tanpa' || w === 'notrx') { acc = 'none'; if (toks[i + 1] && /^(kas|laci|saldo)$/i.test(toks[i + 1])) i++; continue; }
+    if ((w === 'dari' || w === 'ke' || w === 'masuk' || w === 'via') && toks[i + 1]) {
+      var nx = toks[i + 1].toLowerCase();
+      if (KAS_WORDS[nx]) { acc = 'kas'; i++; continue; }
+      var a = WA.waAcc(nx, null, accs);
+      if (a && a.amb) { bad = 'Nama rekening "' + toks[i + 1] + '" cocok dengan lebih dari satu rekening. Tulis lebih lengkap.'; i++; continue; }
+      if (a) { acc = a.id; i++; continue; }
+      bad = 'Rekening "' + toks[i + 1] + '" tidak ditemukan.'; i++; continue;
+    }
+    rest.push(toks[i]);
+  }
+  return { acc: acc, rest: rest, bad: bad };
+}
+async function debtCommand(sid, text, msgId, judul) {
+  var accs = await refreshAccs(sid);
+  var ds = await getDebts(sid);
+  var toks = text.replace(/[,;]+/g, ' ').split(/\s+/).filter(Boolean);
+  var w0 = toks[0].toLowerCase(), w1 = (toks[1] || '').toLowerCase();
+  var HELP = 'Contoh:\n• piutang budi 150rb  (Budi berutang ke kita; uang keluar dari laci)\n• piutang budi 150rb tanpa kas  (tidak mengubah saldo)\n• utang toko abc 300rb masuk bri  (kita berutang; uang masuk ke BRI)\n• bayar piutang budi 50rb  (Budi nyicil)\n• bayar utang abc 100rb dari kas\n• lunas budi\n• cek utang';
+  var isBayar = w0 === 'bayar', isLunas = w0 === 'lunas';
+  var isList = (w0 === 'cek' || w0 === 'daftar') || ((w0 === 'utang' || w0 === 'hutang' || w0 === 'piutang') && toks.length === 1);
+  if (isList) {
+    var which = w0 === 'cek' || w0 === 'daftar' ? w1 : w0;
+    var sel = ds;
+    var kindOnly = (w0 === 'piutang' || w1 === 'piutang') ? 'piutang' : (w0 === 'utang' || w0 === 'hutang') ? 'utang' : null;
+    if (kindOnly === 'piutang') sel = ds.filter(function (d) { return d.kind === 'piutang'; });
+    else if (kindOnly === 'utang') sel = ds.filter(function (d) { return d.kind !== 'piutang'; });
+    return debtList(sel, kindOnly === 'piutang' ? 'Piutang' : kindOnly === 'utang' ? 'Utang kita' : 'Utang piutang');
+  }
+  var td = todayStr();
+  if (isBayar || isLunas) {
+    var kind = null, args = toks.slice(1);
+    if (isBayar) { var k1 = (args[0] || '').toLowerCase(); kind = k1 === 'piutang' ? 'piutang' : 'utang'; args = args.slice(1); }
+    var pa = pickAccTok(args, accs);
+    if (pa.bad) return '⚠️ ' + pa.bad;
+    var amt = null, nameT = [];
+    pa.rest.forEach(function (t) { var v = WA.waAmount(t); if (amt === null && v != null && /\d/.test(t)) amt = v; else nameT.push(t); });
+    var nm = nameT.join(' ');
+    if (!nm) return '⚠️ Tulis nama orangnya.\n' + HELP;
+    var hit = findDebt(ds, nm, kind);
+    if (!hit.length) return '⚠️ Tidak ada ' + (kind === 'piutang' ? 'piutang' : kind === 'utang' ? 'utang' : 'utang atau piutang') + ' yang belum lunas atas nama "' + nm + '". Ketik "cek utang" untuk melihat daftar.';
+    if (hit.length > 1) return '⚠️ Ada ' + hit.length + ' catatan yang cocok dengan "' + nm + '":\n' + hit.map(function (d) { return '• ' + d.name + ' (' + (d.kind === 'piutang' ? 'piutang ' : 'utang ') + rp(debtLeft(d)) + ')'; }).join('\n') + '\nTulis nama lebih lengkap' + (kind ? '.' : ', atau pakai "bayar piutang ..." / "bayar utang ...".');
+    var d = hit[0], left = debtLeft(d), isP = d.kind === 'piutang';
+    if (isLunas && amt === null) amt = left;
+    if (amt === null) return '⚠️ Tulis jumlahnya.\nContoh: bayar ' + (isP ? 'piutang' : 'utang') + ' ' + (d.name || 'budi').toLowerCase() + ' 50rb';
+    if (amt > left) return '⚠️ Jumlah ' + rp(amt) + ' melebihi sisa ' + rp(left) + ' (' + d.name + ').';
+    var payId = 'bot:' + msgId;
+    if ((d.pays || []).some(function (p) { return p.id === payId; })) return '';
+    var acc = pa.acc || 'kas';
+    if (acc !== 'none' && acc !== 'kas' && !accs.some(function (a) { return a.id === acc; })) acc = 'kas';
+    await d.ref.update({ pays: admin.firestore.FieldValue.arrayUnion({ id: payId, date: td, amount: amt, acc: acc, note: 'Dari WhatsApp', at: Date.now() }) });
+    var after = left - amt;
+    return '✅ *' + (isP ? 'Pembayaran diterima' : 'Utang dibayar') + '*\n• Nama: ' + d.name + '\n• Jumlah: ' + rp(amt) + (acc === 'none' ? '' : '\n• ' + (isP ? 'Masuk ke: ' : 'Dibayar dari: ') + accName(accs, acc)) + '\n• ' + (after > 0 ? 'Sisa: ' + rp(after) : '*LUNAS* 🎉');
+  }
+  /* catat baru: piutang / utang */
+  var kind2 = (w0 === 'piutang') ? 'piutang' : 'utang';
+  var pb = pickAccTok(toks.slice(1), accs);
+  if (pb.bad) return '⚠️ ' + pb.bad;
+  var amt2 = null, nm2 = [], tempo = 0;
+  for (var i = 0; i < pb.rest.length; i++) {
+    var t = pb.rest[i], tl = t.toLowerCase();
+    if (tl === 'tempo' && pb.rest[i + 1] && /^\d{1,3}(hari)?$/i.test(pb.rest[i + 1])) { tempo = parseInt(pb.rest[i + 1], 10); i++; continue; }
+    var v = WA.waAmount(t);
+    if (amt2 === null && v != null && /\d/.test(t)) { amt2 = v; continue; }
+    nm2.push(t);
+  }
+  var name2 = nm2.join(' ').replace(/(^|\s)([a-z])/g, function (m0, a, b) { return a + b.toUpperCase(); });
+  if (!name2) return '⚠️ Tulis nama orangnya.\n' + HELP;
+  if (!amt2 || amt2 <= 0) return '⚠️ Tulis jumlahnya.\n' + HELP;
+  var sigD = 'bot:' + msgId;
+  if (ds.some(function (x) { return x.wa === sigD; })) return '';
+  var acc2 = pb.acc || 'kas';
+  var due = '';
+  if (tempo > 0) { var dd = new Date(); dd.setDate(dd.getDate() + tempo); due = dd.getFullYear() + '-' + pad2(dd.getMonth() + 1) + '-' + pad2(dd.getDate()); }
+  await db.collection(P(sid, 'debts')).add({ kind: kind2, name: name2, hp: '', amount: amt2, date: td, due: due, note: 'Dari WhatsApp', acc: acc2, pays: [], createdAt: Date.now(), wa: sigD });
+  return '✅ *' + (kind2 === 'piutang' ? 'Piutang' : 'Utang') + ' tercatat*\n• Nama: ' + name2 + '\n• Jumlah: ' + rp(amt2) + (due ? '\n• Jatuh tempo: ' + tgl(due) : '') + '\n• ' + (acc2 === 'none' ? 'Saldo tidak berubah' : (kind2 === 'piutang' ? 'Uang keluar dari: ' : 'Uang masuk ke: ') + accName(accs, acc2));
+}
+
 async function handleMessage(sock, msg) {
   var jid = msg.key.remoteJid || '';
   if (jid.endsWith('@g.us')) return;            /* lewati grup */
@@ -644,6 +781,17 @@ async function handleMessage(sock, msg) {
       console.log(new Date().toLocaleString('id-ID'), '-', tag + (HAPUS_RE.test(text) ? 'hapus terakhir.' : 'ubah terakhir.'));
     } catch (e) {
       await sock.sendMessage(jid, { text: '⚠️ Gagal: ' + e.message }, { quoted: msg });
+    }
+    return;
+  }
+
+  if (DEBT_RE.test(text) && text.split(/\r?\n/).length === 1) {
+    try {
+      var txd = await debtCommand(sid, text, msg.key.id, judul);
+      if (txd) await sock.sendMessage(jid, { text: txd }, { quoted: msg });
+      console.log(new Date().toLocaleString('id-ID'), '-', tag + 'utang piutang: ' + text.slice(0, 40));
+    } catch (e) {
+      await sock.sendMessage(jid, { text: '⚠️ Gagal mencatat utang piutang: ' + e.message }, { quoted: msg });
     }
     return;
   }

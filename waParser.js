@@ -112,7 +112,23 @@ function fx(t, accs) {
     r.ex = [{ acc: t.payAcc, v: r.kas }];
     r.kas = 0;
   }
+  /* pelanggan belum bayar (utang): laci tidak bertambah, dicatat sebagai piutang */
+  if (t.pay === 'utang') {
+    var L = lk(t.type), f = +t.fee || 0;
+    if (L === 'tarik') { if (t.adm !== 'potong' && t.adm !== 'dalam') r.kas -= f; }
+    else if (L === 'keluar' || L === 'masuk') { r.kas = 0; r.saldo = 0; }
+    else if (L === 'isi') r.kas = 0;
+    else if (r.kas > 0) r.kas = 0;
+  }
   return r;
+}
+/* jumlah dan arah catatan utang untuk transaksi "utang" (sama dengan aplikasi) */
+function debtFor(t, accs) {
+  var a = +t.amount || 0, L = lk(t.type);
+  if (L === 'keluar' || L === 'isi') return a > 0 ? { kind: 'utang', amount: a } : null;
+  if (L === 'masuk') return a > 0 ? { kind: 'piutang', amount: a } : null;
+  var d = fx0(t, accs).kas - fx(Object.assign({}, t, { pay: 'utang' }), accs).kas;
+  return d > 0 ? { kind: 'piutang', amount: d } : null;
 }
 
 /* rekening default bila catatan tidak punya rekening valid: bank pertama, lalu e-wallet pertama (sama dengan aplikasi) */
@@ -131,7 +147,7 @@ function txAcc(t, accs) {
 }
 
 /* saldo semua rekening + laci tunai, dihitung dari seluruh riwayat (sama seperti kartu "Beranda" di aplikasi) */
-function calcBalance(accs, kasAwal, txs, mvs) {
+function calcBalance(accs, kasAwal, txs, mvs, debts) {
   var bal = {}, kas = +kasAwal || 0;
   (accs || []).forEach(function (a) { bal[a.id] = +a.opening || 0; });
   function add(id, v) {
@@ -149,6 +165,12 @@ function calcBalance(accs, kasAwal, txs, mvs) {
     if (m.type === 'tambah') add(m.acc, v);
     else if (m.type === 'kurang') add(m.acc, -v);
     else { add(m.from, -v - f); add(m.to, v); }
+  });
+  /* utang piutang: uang pinjaman keluar/masuk, lalu cicilan yang diterima/dibayar (sama dengan aplikasi) */
+  (debts || []).forEach(function (d) {
+    var sg = d.kind === 'piutang' ? -1 : 1;
+    if (d.acc && d.acc !== 'none') add(d.acc, sg * (+d.amount || 0));
+    (d.pays || []).forEach(function (p) { if (p.acc && p.acc !== 'none') add(p.acc, -sg * (+p.amount || 0)); });
   });
   var total = kas; for (var k in bal) total += bal[k];
   return { bal: bal, kas: kas, total: total };
@@ -215,6 +237,7 @@ function waLine0(raw, defDate, accs, settings) {
     if ((low === 'terima' || low === 'diterima') && i + 1 < toks.length && waAmount(toks[i + 1]) != null) { recv = waAmount(toks[i + 1]); i++; continue; }
     if (lk(type) === 'tarik' && ADM[low]) { adm = low; continue; }
     /* cara bayar pelanggan: cash/tunai, atau tf/trf/transfer lalu (boleh) nama rekening tujuan */
+    if (T && (low === 'utang' || low === 'hutang' || low === 'bon' || low === 'kasbon' || low === 'ngutang')) { pay = 'utang'; continue; }
     if (T && T.pay) {
       if (payWait) {
         payWait = false;
@@ -284,12 +307,16 @@ function waLine0(raw, defDate, accs, settings) {
   if (T.modal) t.modal = modal;
   if (T.pay) {
     t.pay = pay || 'cash';
+    if (t.pay === 'utang' && !name.join(' ').trim()) return { ok: false, msg: 'Utang perlu nama pelanggan, misalnya "pulsa 10rb bri admin 2000 utang budi".' };
     if (t.pay === 'transfer') {
       var pid = payAcc;
       if (!pid) { var pl = accs.filter(function (a) { return a.kind === 'bank' || a.kind === 'ewallet'; }); if (pl.length === 1) pid = pl[0].id; }
       if (!pid) return { ok: false, msg: 'Tulis rekening tujuan transfer pelanggan, misalnya "tf bri" atau "trf gopay".' };
       t.payAcc = pid;
     }
+  } else if (pay === 'utang') {
+    t.pay = 'utang';
+    if (!name.join(' ').trim()) return { ok: false, msg: 'Utang perlu nama, misalnya "pulsa 10rb bri admin 2000 utang budi".' };
   }
   if (T.dest && bt) { t.bt = bt; if (rek) t.rek = rek; }
   if (T.acc) {
@@ -382,7 +409,7 @@ function reorder(text, accs) {
     if (idx > 0) {
       var okBefore = toks.slice(0, idx).every(function (t) {
         var l = t.toLowerCase().replace(/[,;]+$/, '');
-        return waAmount(l) != null || KW_VAL[l] || l === 'cash' || l === 'tunai' || l === 'kas' || l === 'laci' || !!waAcc(l, null, accs);
+        return waAmount(l) != null || KW_VAL[l] || l === 'cash' || l === 'tunai' || l === 'utang' || l === 'kas' || l === 'laci' || !!waAcc(l, null, accs);
       });
       if (okBefore) {
         var moved = [toks.splice(idx, 1)[0]];
@@ -426,4 +453,4 @@ function waLine(raw, defDate, accs, settings) {
   return r;
 }
 
-module.exports = { waAcc: waAcc, waAmount: waAmount, KAS: KAS, waLine: waLine, TYPES: TYPES, ADM: ADM, waNorm: waNorm, lk: lk, fx: fx, calcBalance: calcBalance, splitLines: splitLines };
+module.exports = { waAcc: waAcc, waAmount: waAmount, KAS: KAS, waLine: waLine, TYPES: TYPES, ADM: ADM, waNorm: waNorm, lk: lk, fx: fx, calcBalance: calcBalance, debtFor: debtFor, splitLines: splitLines };
