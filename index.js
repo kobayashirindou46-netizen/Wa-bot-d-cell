@@ -485,7 +485,7 @@ function txCsv(list, accs) {
   return '﻿' + head.join(',') + '\r\n' + rows.join('\r\n') + '\r\n';
 }
 async function buildBackup(sid) {
-  var cols = ['tx', 'acc', 'mv', 'debts', 'products'], out = { dibuat: new Date().toISOString(), shopId: sid, versi: 'bot-v20' };
+  var cols = ['tx', 'acc', 'mv', 'debts', 'products'], out = { dibuat: new Date().toISOString(), shopId: sid, versi: 'bot-v21' };
   for (var i = 0; i < cols.length; i++) {
     var sn = await db.collection(P(sid, cols[i])).get();
     out[cols[i]] = sn.docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
@@ -823,12 +823,12 @@ function rekapTargets() {
   var out = [], u = readTokoFile().utama, jamU = (u && u.rekapJam !== undefined) ? u.rekapJam : 23;
   if (ownShopId && jamU !== false && jamU !== null && !isNaN(+jamU) && curSock && curSock.user && curSock.user.id) {
     var me = String(curSock.user.id).split(':')[0].split('@')[0];
-    out.push({ sid: ownShopId, jid: me + '@s.whatsapp.net', jam: +jamU, nama: 'Toko utama', ingat: ingatOf(u) });
+    out.push({ sid: ownShopId, jid: me + '@s.whatsapp.net', jam: +jamU, nama: 'Toko utama', ingat: ingatOf(u), cust: !!(u && u.ingatPelanggan === true), namaToko: (u && u.namaToko) || '' });
   }
   tokoList.forEach(function (t) {
     if (t.rekapJam === undefined || t.rekapJam === null || t.rekapJam === false || isNaN(+t.rekapJam)) return;
     var n = TOKO.normNum(t.nomor); if (!n) return;
-    out.push({ sid: t.shopId, jid: n + '@s.whatsapp.net', jam: +t.rekapJam, nama: t.nama, ingat: ingatOf(t) });
+    out.push({ sid: t.shopId, jid: n + '@s.whatsapp.net', jam: +t.rekapJam, nama: t.nama, ingat: ingatOf(t), cust: t.ingatPelanggan === true, namaToko: t.namaToko || t.nama || '' });
   });
   return out;
 }
@@ -874,6 +874,58 @@ function ingatText(ds) {
   L.push('_Bayar: "bayar piutang budi 50rb" · Lunas: "lunas budi"_');
   return L.join('\n');
 }
+/* ---------- pengingat ke pelanggan yang berutang (bot v21) ----------
+   Hanya jalan kalau di toko.json ditulis "ingatPelanggan": true. Dikirim ke nomor HP yang tersimpan di catatan piutang. */
+var CUST_PATH = path.join(ROOT, 'ingat-pelanggan-state.json');
+function readCustState() { try { return JSON.parse(fs.readFileSync(CUST_PATH, 'utf8')) || {}; } catch (e) { return {}; } }
+function writeCustState(st) { try { fs.writeFileSync(CUST_PATH, JSON.stringify(st)); } catch (e) { console.error('[PERINGATAN] ingat-pelanggan-state.json tidak bisa ditulis:', e.message); } }
+function dayDiff(a, b) { return Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 864e5); }
+/* nomor WhatsApp Indonesia (08..., 628..., +628...). Hasil 08xxxxxxxxx, atau '' kalau bukan nomor */
+function hpOf(t) {
+  var d = String(t || '').replace(/[^\d]/g, '');
+  if (!/^(62|0)8\d{8,12}$/.test(d)) return '';
+  return d.indexOf('62') === 0 ? '0' + d.slice(2) : d;
+}
+function custText(d, namaToko) {
+  var td = todayStr(), n = dayDiff(td, d.due), left = debtLeft(d);
+  var tag = n < 0 ? 'sudah lewat jatuh tempo ' + (-n) + ' hari (tempo ' + tgl(d.due) + ')' : n === 0 ? 'jatuh tempo hari ini' : 'jatuh tempo besok (' + tgl(d.due) + ')';
+  return 'Halo ' + (d.name || 'Kak') + ', ini pengingat dari ' + (namaToko || 'toko kami') + '.\n\nPiutang Anda ' + rp(left) + (debtPaid(d) ? ' (sisa dari ' + rp(d.amount) + ')' : '') + ' ' + tag + '.\n\nMohon segera diselesaikan ya. Abaikan pesan ini kalau Anda sudah membayar. Terima kasih 🙏';
+}
+/* kirim pengingat: mulai sehari sebelum jatuh tempo, lalu tiap 3 hari selama belum lunas, paling banyak 5 kali per catatan, paling banyak 15 pesan per hari */
+async function kirimPengingatPelanggan(sock, t, ds) {
+  var out = { ok: [], gagal: [] };
+  if (!t.cust) return out;
+  var today = todayStr(), st = readCustState();
+  var owner = String(t.jid || '').split('@')[0];
+  var cand = ds.filter(function (d) { return d.kind === 'piutang' && debtLeft(d) > 0 && d.due && hpOf(d.hp); });
+  for (var i = 0; i < cand.length; i++) {
+    var d = cand[i], key = t.sid + '|' + d.id, s = st[key] || { n: 0, last: '' };
+    if (dayDiff(today, d.due) > 1) continue;
+    if (s.n >= 5) continue;
+    if (s.last && dayDiff(s.last, today) < 3) continue;
+    if (out.ok.length >= 15) break;
+    var num = TOKO.normNum(hpOf(d.hp));
+    if (num === owner) continue;
+    try {
+      try { var ex = await sock.onWhatsApp(num); if (ex && ex[0] && ex[0].exists === false) { out.gagal.push(d.name + ' (nomor tidak memakai WhatsApp)'); st[key] = { n: 5, last: today }; continue; } } catch (e0) { /* lanjut kirim saja */ }
+      await sock.sendMessage(num + '@s.whatsapp.net', { text: custText(d, t.namaToko) });
+      st[key] = { n: s.n + 1, last: today };
+      out.ok.push({ name: d.name || 'Tanpa nama', left: debtLeft(d), hp: hpOf(d.hp) });
+      console.log(new Date().toLocaleString('id-ID'), '- pengingat ke pelanggan terkirim:', d.name);
+    } catch (e) { out.gagal.push((d.name || 'Tanpa nama') + ' (' + (e && e.message ? e.message : 'gagal') + ')'); }
+    writeCustState(st);
+    await new Promise(function (r) { setTimeout(r, 3000 + Math.floor(Math.random() * 3000)); });
+  }
+  writeCustState(st);
+  return out;
+}
+function custSummary(r) {
+  if (!r.ok.length && !r.gagal.length) return '';
+  var L = ['📨 *Pengingat ke pelanggan*'];
+  r.ok.forEach(function (x) { L.push('• Terkirim: ' + x.name + ' (' + x.hp + ') ' + rp(x.left)); });
+  r.gagal.forEach(function (x) { L.push('• Gagal: ' + x); });
+  return L.join('\n');
+}
 function cekIngat() {
   if (ingatBusy || !curSock) return;
   var now = new Date(), today = todayStr(), st = readRekapState(), list = rekapTargets();
@@ -888,6 +940,7 @@ function cekIngat() {
         return (txt ? sock.sendMessage(t.jid, { text: txt }) : Promise.resolve()).then(function () {
           var st2 = readRekapState(); st2['ingat|' + t.sid + '|' + t.jid] = today; writeRekapState(st2);
           if (txt) console.log(new Date().toLocaleString('id-ID'), '- pengingat utang terkirim ke', t.nama);
+          return kirimPengingatPelanggan(sock, t, ds).then(function (r) { var sm = custSummary(r); return sm ? sock.sendMessage(t.jid, { text: sm }) : null; });
         });
       }).catch(function (e) { console.error('[PERINGATAN] Pengingat utang ' + t.nama + ' gagal:', e && e.message ? e.message : e); });
     });
@@ -1027,7 +1080,7 @@ async function start() {
 
 
 /* ---------- perintah utang piutang lewat WhatsApp ---------- */
-var DEBT_RE = /^(piutang|utang|hutang|daftar\s+(utang|piutang|hutang)|cek\s+(utang|piutang|hutang)|bayar\s+(piutang|utang|hutang)|lunas)\b/i;
+var DEBT_RE = /^(piutang|utang|hutang|daftar\s+(utang|piutang|hutang)|cek\s+(utang|piutang|hutang)|bayar\s+(piutang|utang|hutang)|lunas|nomor)\b/i;
 function nrm(x) { return String(x || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
 function tglPendek(d) { return d ? tgl(d) : ''; }
 function debtList(ds, judul) {
@@ -1074,7 +1127,16 @@ async function debtCommand(sid, text, msgId, judul) {
   var ds = await getDebts(sid);
   var toks = text.replace(/[,;]+/g, ' ').split(/\s+/).filter(Boolean);
   var w0 = toks[0].toLowerCase(), w1 = (toks[1] || '').toLowerCase();
-  var HELP = 'Contoh:\n• piutang budi 150rb  (Budi berutang ke kita; uang keluar dari laci)\n• piutang budi 150rb tanpa kas  (tidak mengubah saldo)\n• utang toko abc 300rb masuk bri  (kita berutang; uang masuk ke BRI)\n• bayar piutang budi 50rb  (Budi nyicil)\n• bayar utang abc 100rb dari kas\n• lunas budi\n• cek utang';
+  var HELP = 'Contoh:\n• piutang budi 150rb  (Budi berutang ke kita; uang keluar dari laci)\n• piutang budi 150rb tanpa kas  (tidak mengubah saldo)\n• utang toko abc 300rb masuk bri  (kita berutang; uang masuk ke BRI)\n• bayar piutang budi 50rb  (Budi nyicil)\n• bayar utang abc 100rb dari kas\n• piutang budi 150rb tempo 7 081234567890  (dengan nomor WhatsApp Budi, untuk pengingat ke pelanggan)\n• nomor budi 081234567890  (simpan atau ganti nomor Budi)\n• lunas budi\n• cek utang';
+  if (w0 === 'nomor') {
+    var hpN = hpOf(toks[toks.length - 1]), nmN = toks.slice(1, -1).join(' ');
+    if (!hpN || !nmN) return '⚠️ Tulis nama dan nomor WhatsApp yang benar.\nContoh: nomor budi 081234567890';
+    var hitN = findDebt(ds, nmN, null);
+    if (!hitN.length) return '⚠️ Tidak ada utang atau piutang yang belum lunas atas nama "' + nmN + '". Ketik "cek utang" untuk melihat daftar.';
+    if (hitN.length > 1) return '⚠️ Ada ' + hitN.length + ' catatan yang cocok dengan "' + nmN + '". Tulis nama lebih lengkap.';
+    await hitN[0].ref.update({ hp: hpN });
+    return '✅ *Nomor tersimpan*\n• Nama: ' + hitN[0].name + '\n• HP: ' + hpN;
+  }
   var isBayar = w0 === 'bayar', isLunas = w0 === 'lunas';
   var isList = (w0 === 'cek' || w0 === 'daftar') || ((w0 === 'utang' || w0 === 'hutang' || w0 === 'piutang') && toks.length === 1);
   if (isList) {
@@ -1112,7 +1174,9 @@ async function debtCommand(sid, text, msgId, judul) {
   }
   /* catat baru: piutang / utang */
   var kind2 = (w0 === 'piutang') ? 'piutang' : 'utang';
-  var pb = pickAccTok(toks.slice(1), accs);
+  var hp2 = '';
+  var rest0 = toks.slice(1).filter(function (t) { var h = hpOf(t); if (h && !hp2) { hp2 = h; return false; } return true; });
+  var pb = pickAccTok(rest0, accs);
   if (pb.bad) return '⚠️ ' + pb.bad;
   var amt2 = null, nm2 = [], tempo = 0;
   for (var i = 0; i < pb.rest.length; i++) {
@@ -1130,8 +1194,8 @@ async function debtCommand(sid, text, msgId, judul) {
   var acc2 = pb.acc || 'kas';
   var due = '';
   if (tempo > 0) { var dd = new Date(); dd.setDate(dd.getDate() + tempo); due = dd.getFullYear() + '-' + pad2(dd.getMonth() + 1) + '-' + pad2(dd.getDate()); }
-  await db.collection(P(sid, 'debts')).add({ kind: kind2, name: name2, hp: '', amount: amt2, date: td, due: due, note: 'Dari WhatsApp', acc: acc2, pays: [], createdAt: Date.now(), wa: sigD });
-  return '✅ *' + (kind2 === 'piutang' ? 'Piutang' : 'Utang') + ' tercatat*\n• Nama: ' + name2 + '\n• Jumlah: ' + rp(amt2) + (due ? '\n• Jatuh tempo: ' + tgl(due) : '') + '\n• ' + (acc2 === 'none' ? 'Saldo tidak berubah' : (kind2 === 'piutang' ? 'Uang keluar dari: ' : 'Uang masuk ke: ') + accName(accs, acc2));
+  await db.collection(P(sid, 'debts')).add({ kind: kind2, name: name2, hp: hp2, amount: amt2, date: td, due: due, note: 'Dari WhatsApp', acc: acc2, pays: [], createdAt: Date.now(), wa: sigD });
+  return '✅ *' + (kind2 === 'piutang' ? 'Piutang' : 'Utang') + ' tercatat*\n• Nama: ' + name2 + '\n• Jumlah: ' + rp(amt2) + (due ? '\n• Jatuh tempo: ' + tgl(due) : '') + (hp2 ? '\n• HP: ' + hp2 : '') + '\n• ' + (acc2 === 'none' ? 'Saldo tidak berubah' : (kind2 === 'piutang' ? 'Uang keluar dari: ' : 'Uang masuk ke: ') + accName(accs, acc2));
 }
 
 async function handleMessage(sock, msg) {
