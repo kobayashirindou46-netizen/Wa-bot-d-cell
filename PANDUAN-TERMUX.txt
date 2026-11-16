@@ -19,10 +19,59 @@ kolom impor WA di aplikasi):
   keluar 50rb beli galon
   pindah 500rb bri dana
 
+Cara bayar pelanggan (khusus pulsa, bayar, listrik, dan jual aksesoris):
+  tulis "cash" (tunai) atau "tf" (transfer) di akhir pesan. Untuk transfer,
+  tambahkan nama rekening tempat uang pelanggan masuk. Kalau tidak ditulis,
+  dianggap tunai.
+  pulsa 50rb uob admin 3000 tf bri budi
+
+Salah catat? Bot bisa membetulkan transaksi TERAKHIR yang dicatat bot:
+  hapus terakhir              -> hapus transaksi terakhir
+  ubah terakhir admin 3000    -> ganti biaya admin
+  ubah terakhir nominal 150rb -> ganti nominal
+  ubah terakhir tf bri        -> pelanggan ternyata bayar transfer ke BRI
+  ubah terakhir cash          -> pelanggan ternyata bayar tunai
+  (bisa digabung: ubah terakhir admin 2000 cash). Hanya transaksi yang dicatat
+  lewat bot yang bisa dihapus/diubah, transaksi dari aplikasi tidak.
+
+Peringatan saldo menipis: atur batasnya di aplikasi (Pengaturan > Batas saldo
+  menipis). Bot lalu menambahkan peringatan di balasan bila ada saldo di bawah
+  batas, dan menandai saldo itu di "cek saldo".
+
+Rekap harian otomatis: tiap malam jam 23.00 bot mengirim ringkasan (jumlah
+  transaksi, omzet, laba, dan saldo) ke chat "Kirim pesan ke diri sendiri" di
+  nomor bot. Ganti jamnya di toko.json bagian "utama": "rekapJam": 22 (isi false
+  untuk mematikan). Toko lain di daftar "toko" mendapat rekap hanya bila diberi
+  "rekapJam", contoh: { "nama": "Toko B", "nomor": "0812...", "email": "...",
+  "rekapJam": 21 }. Rekap tidak dikirim dua kali dalam sehari, walau bot dimulai ulang.
+
+Kembalian: tambahkan "terima 100rb" (uang yang diberikan pelanggan) di pesan,
+  bot menuliskan berapa kembaliannya di balasan. Hanya info, tidak disimpan.
+  pulsa 50rb uob admin 3000 terima 100rb
+
+Biaya admin otomatis: kalau di pesan TIDAK menulis "admin ...", bot memakai
+  "Tarif admin otomatis" yang diatur pemilik toko di aplikasi (Pengaturan),
+  sama seperti input lewat formulir. Mau admin lain, tulis sendiri
+  ("admin 3000"). Mau tanpa admin, tulis "admin 0".
+
+Kartu ATM nasabah (hanya biaya admin yang masuk laci):
+  kartu admin 5000
+
 Selain mencatat transaksi, bot juga bisa membalas ringkasan kalau Anda
 ketik salah satu perintah ini (tanpa perlu format khusus):
   saldo               -> rincian saldo tiap bank/e-wallet + uang tunai laci
   cek saldo           -> sama seperti di atas
+  koreksi             -> bot membalas contoh yang tinggal disalin, diubah angkanya,
+                         lalu dikirim lagi (menyamakan catatan dengan uang sebenarnya)
+  koreksi bri 5jt     -> saldo BRI di buku disamakan menjadi Rp5.000.000
+  koreksi laci 1,2jt  -> uang tunai laci disamakan menjadi Rp1.200.000
+  Banyak sekaligus (satu rekening per baris):
+     koreksi
+     laci 1200000
+     bri 5jt
+     dana 350rb
+  Koreksi dicatat sebagai penyesuaian saldo awal (sama seperti "Ubah saldo" di
+  aplikasi), tidak muncul sebagai transaksi dan tidak mengubah laba.
   transaksi hari ini  -> jumlah transaksi, pemasukan, pengeluaran, dan laba hari ini
   cek transaksi       -> sama seperti di atas
 
@@ -185,3 +234,153 @@ BATASAN YANG PERLU DIKETAHUI
 - HP bot harus tetap menyala dan online. Kalau mati atau internet
   putus, pesan yang masuk selama itu TIDAK akan tercatat otomatis
   (tidak ada riwayat yang diproses ulang setelah menyala lagi).
+
+
+TOKO LAIN
+---------
+Kalau bot mau dipakai pemilik toko lain (akun berbeda), baca PANDUAN-TOKO-LAIN.txt.
+
+
+BANYAK TRANSAKSI SEKALIGUS
+--------------------------
+Satu pesan boleh berisi banyak transaksi: satu baris = satu transaksi. Nomor urut di
+depan baris boleh dipakai atau tidak. Contoh:
+  1 tarik tunai 500rb bri admin 5000
+  2 transfer 1jt bni bri 1234567890 ani
+  3 pulsa 60rb bri admin 5k trf gopay
+Bot membalas satu ringkasan: tiap baris diberi centang kalau tercatat, atau tanda
+peringatan kalau tidak bisa dibaca (baris yang salah tidak menggagalkan baris lainnya).
+Pesan beberapa baris yang isinya obrolan biasa diabaikan. Maksimal 30 baris per pesan.
+
+
+UTANG PIUTANG (BARU)
+--------------------
+Piutang = orang lain berutang ke kita. Utang = kita berutang ke orang lain.
+Contoh pesan:
+  piutang budi 150rb                 Budi berutang 150rb (uang keluar dari laci)
+  piutang budi 150rb tempo 7         sama, jatuh tempo 7 hari lagi
+  piutang sari 70rb tanpa kas        saldo tidak berubah
+  utang toko abc 300rb masuk bri     kita berutang, uang masuk ke BRI
+  bayar piutang budi 50rb            Budi nyicil 50rb (masuk laci)
+  bayar piutang budi 50rb ke bri     cicilan masuk ke BRI
+  bayar utang abc 100rb dari bri     kita bayar utang dari BRI
+  lunas budi                         lunasi sisa sekaligus
+  cek utang                          daftar semua yang belum lunas
+Kata "utang" boleh dipakai di SEMUA jenis transaksi (tarik, kartu, transfer, topup, pulsa, listrik,
+jual, masuk, keluar, isi saldo). Tulis kata "utang" lalu nama, misalnya
+  pulsa 10rb bri admin 2000 utang budi
+  jual 40rb modal 25rb utang rina
+Uang belum bergerak, dan otomatis tercatat di Utang piutang atas nama itu:
+  - transfer, topup, pulsa, listrik, jual, masuk: PIUTANG (pelanggan belum bayar)
+  - tarik tunai dan kartu: piutang sebesar admin saja
+  - keluar dan isi saldo: UTANG kita (kita belum bayar)
+Laba tetap dihitung di hari transaksi. Pelunasan dicatat dengan "bayar piutang ..." atau "bayar utang ...".
+Hati-hati: jangan tulis kata "utang" di pesan pengeluaran kalau maksudnya MEMBAYAR utang; pakai "bayar utang ...".
+Syarat: aturan Firebase (firestore.rules) harus sudah diperbarui, lihat panduan aplikasi v19.
+
+
+PENGINGAT UTANG PIUTANG OTOMATIS (BARU)
+--------------------------------------
+Tiap pagi jam 08.00 bot mengirim daftar utang piutang yang terlambat atau jatuh tempo dalam 3 hari
+ke nomor Anda (nomor yang sama dengan rekap harian). Kalau tidak ada yang jatuh tempo, bot tidak mengirim apa pun.
+Mengubah jam: di toko.json tulis  "ingatJam": 9   (di dalam "utama" atau di dalam toko yang bersangkutan)
+Mematikan:     "ingatJam": false
+Jatuh tempo diisi saat mencatat piutang di aplikasi, atau lewat bot: piutang budi 150rb tempo 7
+
+
+MENCATAT TRANSAKSI KEMARIN ATAU TANGGAL LAIN (PESAN BANYAK BARIS)
+-----------------------------------------------------------------
+Tulis tanggal di baris sendiri, lalu transaksinya di bawahnya. Tanggal berlaku sampai ada baris tanggal berikutnya:
+  12/11
+  1. Tf 40rb bri bri admin 5rb kom 2500 pot 500 cash
+  2. Pulsa 15rb bri admin 3000 komisi 1rb cash
+  13/11
+  3. Tarik 500rb bri
+Bentuk tanggal yang dikenali: 12/11, 12/11/2026, tgl 12/11, Kamis 12-11, kemarin, hari ini.
+Satu transaksi saja juga bisa: tulis 12/11 atau kata kemarin di dalam barisnya.
+
+
+BUKA KAS DAN SHIFT (BARU, SAMA DENGAN MENU "BUKA KAS" DI APLIKASI)
+-------------------------------------------------------------------
+Kirim dari WhatsApp (nomor yang sudah terdaftar):
+  buka kas 500rb pagi        = catat modal awal laci Rp500.000, shift Pagi
+  buka kas 300rb malam       = shift Malam
+  buka kas 500rb             = shift dipilih otomatis (sebelum jam 15.00 = Pagi, sesudahnya = Malam)
+  buka kas 450rb samakan     = sekalian menyamakan catatan buku dengan modal awal itu
+  status kas                 = lihat kas sudah/belum dibuka dan uang di laci menurut buku
+Catatan penting:
+- Tanpa kata "samakan", catatan buku TIDAK berubah. Bot hanya mencatat modal awal dan memberi tahu
+  selisihnya dengan buku. Jadi saldo dan laba aman.
+- Setelah kas dibuka, semua transaksi baru hari itu (dari WhatsApp maupun aplikasi) ditandai shift-nya.
+  Shift terlihat di rincian transaksi di aplikasi.
+- Kalau kas belum dibuka, transaksi tetap tercatat seperti biasa, hanya tanpa tanda shift.
+- Ketik "transaksi hari ini" untuk melihat status kas bersama ringkasan hari ini. Rekap harian malam juga memuatnya.
+
+
+PENJUALAN DARI KASIR (APLIKASI V36 KE ATAS)
+-------------------------------------------
+Setiap penjualan di menu Kasir otomatis masuk Buku Kas sebagai "Aksesoris (jual barang)".
+Bot sudah mengenali ini: penjualan Kasir ikut terhitung di "transaksi hari ini" dan rekap harian,
+dengan baris tambahan "Penjualan dari Kasir: jumlah (total)".
+- Stok dan daftar barang Kasir tersimpan di HP/komputer yang memakai Kasir, bukan di Firebase,
+  jadi bot tidak bisa menampilkan stok.
+- "hapus terakhir" lewat WhatsApp hanya menghapus transaksi yang dicatat bot, tidak menyentuh penjualan Kasir.
+
+
+=====================================================================
+STOK BARANG (bot v16)
+=====================================================================
+Produk dan stok dibaca dari Firebase (sama dengan Kasir). Produk baru tetap dibuat di Kasir
+(butuh harga jual/beli). Lewat WhatsApp:
+  tambah stok pulsa 5rb 20            -> stok bertambah 20
+  tambah stok kabel usb 10 @12000     -> tambah 10 dan ubah harga beli jadi 12000
+  kurang stok kabel usb 2             -> stok berkurang 2
+  stok masuk                          -> barang banyak sekaligus, satu baris per barang:
+  Pulsa 5rb 20
+  Kabel USB 10
+  cek stok kabel                      -> lihat stok satu barang
+  stok menipis                        -> daftar stok di bawah batas minimum
+Nama cukup sebagian asalkan hanya cocok dengan satu produk. Pesan yang sama tidak diproses dua kali.
+Rekap harian juga menampilkan stok yang menipis.
+
+=====================================================================
+PERSETUJUAN PENDAFTAR (bot v16)
+=====================================================================
+Saat ada yang daftar di aplikasi, bot mengirim pesan ke WhatsApp Anda (dicek tiap 2 menit).
+Dari chat ke diri sendiri / toko utama:
+  pendaftar           -> daftar yang menunggu
+  setujui 1           -> setujui nomor 1
+  tolak 1             -> tolak nomor 1
+  setujui semua
+Bot juga membuat dokumen meta/admin otomatis agar menu Persetujuan di aplikasi aktif.
+
+HARGA JUAL SAAT TAMBAH STOK (bot v17)
+  tambah stok kabel usb 10 @12000 jual 20000   -> tambah 10, harga beli 12000, harga jual 20000
+  Di "stok masuk": Kabel USB 10 @12000 jual 20000
+  "@harga" dan "jual harga" boleh dipakai salah satu saja. Hanya berlaku untuk penambahan stok.
+
+
+PEMBELIAN STOK TERCATAT KE BUKU KAS (bot v18)
+  tambah stok pulsa 20 @5000              -> stok +20 dan pengeluaran Rp100.000 dari kas laci
+  tambah stok pulsa 20 @5000 dari bri     -> dibayar dari rekening BRI
+  tambah stok pulsa 20 @5000 tanpa kas    -> hanya stok dan harga beli, tidak dicatat sebagai pengeluaran
+  Tanpa "@harga" tidak ada pengeluaran yang dicatat. Pembelian stok TIDAK mengurangi laba
+  (modal barang sudah dihitung saat barang terjual), tetapi mengurangi saldo kas/rekening.
+
+
+PERINGATAN SALDO OTOMATIS DAN CADANGAN DATA (bot v19)
+- Bot memeriksa saldo tiap 10 menit (pukul 07.00-22.00). Bila ada rekening/kas di bawah "Batas saldo menipis"
+  (atur di aplikasi: Pengaturan > Batas saldo menipis), bot langsung mengirim peringatan ke WhatsApp.
+  Maksimal 3 pesan per hari per toko, dan tidak diulang bila kondisinya sama.
+- Cadangan: tiap hari Minggu pukul 21.00 ke atas bot mengirim 2 file ke chat Anda sendiri:
+  transaksi-dcell-TANGGAL.csv (buka di Excel) dan cadangan-lengkap-dcell-TANGGAL.json.
+  Kapan saja bisa diminta dengan mengetik: cadangan
+
+
+LAPORAN BULANAN OTOMATIS DAN RETUR (bot v20)
+- Tiap tanggal 1 sampai 3 pukul 08.00 ke atas, bot mengirim laporan bulan sebelumnya ke WhatsApp Anda:
+  jumlah transaksi, omzet, pengeluaran, belanja stok, retur, laba bersih (dibanding bulan lalu),
+  jenis terbanyak, hari terbaik, dan sisa piutang. Dikirim sekali per bulan.
+- Kapan saja bisa diminta: ketik  laporan bulan  (bulan ini) atau  laporan bulan lalu
+- Retur dari Kasir ikut dihitung benar di laba (hanya selisih modal yang berkurang).
+- Pengingat utang jatuh tempo sudah ada sejak versi lama (jam pengingat diatur di toko.json).

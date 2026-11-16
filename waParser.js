@@ -96,8 +96,9 @@ function fx0(t, accs) {
       return { saldo: a + k - b, kas: -a + f, laba: f + k - b };
     case 'isi': return { saldo: a, kas: -a, laba: 0 };
     case 'keluar':
-      if (hasAcc(accs, t.acc)) return { saldo: -a, kas: 0, laba: -a };
-      return { saldo: 0, kas: -a, laba: -a };
+      var lbK = t.stok ? 0 : (t.retur ? (+t.modal || 0) - a : -a);
+      if (hasAcc(accs, t.acc)) return { saldo: -a, kas: 0, laba: lbK };
+      return { saldo: 0, kas: -a, laba: lbK };
     case 'jual': return { saldo: 0, kas: a, laba: a - (+t.modal || 0) };
     case 'masuk':
       if (hasAcc(accs, t.acc)) return { saldo: a, kas: 0, laba: a };
@@ -176,6 +177,18 @@ function calcBalance(accs, kasAwal, txs, mvs, debts) {
   return { bal: bal, kas: kas, total: total };
 }
 
+/* baris yang isinya hanya tanggal ("12/11", "tgl 12/11/2026", "Kamis, 12-11", "kemarin", "hari ini")
+   dipakai sebagai tanggal untuk baris-baris di bawahnya. Mengembalikan 'YYYY-MM-DD', 'invalid', atau null. */
+function headerDate(line) {
+  var t = String(line || '').toLowerCase().replace(/^[\s\-*\u2022\d.)]*(?=\D)/, function (m) { return /\d/.test(m) && /^\s*\d+[.)]\s*$/.test(m) ? '' : m; });
+  t = t.replace(/[:,;]+/g, ' ').replace(/\s+/g, ' ').trim();
+  t = t.replace(/^(senin|selasa|rabu|kamis|jumat|jum'at|sabtu|minggu|ahad)\s+/, '').replace(/^(tgl|tanggal)\.?\s*/, '').trim();
+  if (t === 'kemarin') { var yd = new Date(); yd.setDate(yd.getDate() - 1); return ymd(yd); }
+  if (t === 'hari ini' || t === 'hariini') return ymd(new Date());
+  var m = /^(\d{1,2})[\/\-.](\d{1,2})(?:[\/\-.](\d{2,4}))?$/.exec(t);
+  if (!m) return null;
+  return waDate(+m[1], +m[2], m[3] || '') || 'invalid';
+}
 function waDate(d, mo, y) {
   var yy = y ? (String(y).length === 2 ? 2000 + (+y) : +y) : new Date().getFullYear();
   var dt = new Date(yy, mo - 1, d);
@@ -453,4 +466,4 @@ function waLine(raw, defDate, accs, settings) {
   return r;
 }
 
-module.exports = { waAcc: waAcc, waAmount: waAmount, KAS: KAS, waLine: waLine, TYPES: TYPES, ADM: ADM, waNorm: waNorm, lk: lk, fx: fx, calcBalance: calcBalance, debtFor: debtFor, splitLines: splitLines };
+module.exports = { waAcc: waAcc, waAmount: waAmount, KAS: KAS, waLine: waLine, TYPES: TYPES, ADM: ADM, waNorm: waNorm, lk: lk, fx: fx, calcBalance: calcBalance, debtFor: debtFor, splitLines: splitLines, headerDate: headerDate };

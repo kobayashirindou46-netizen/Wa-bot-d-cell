@@ -72,7 +72,9 @@ function resolveShopId() {
       return ownShopId;
     });
   }
-  return db.collection('users').where('role', '==', 'owner').limit(2).get().then(function (snap) {
+  return db.collection('users').where('role', '==', 'owner').limit(50).get().then(function (snap0) {
+    var snap = { docs: snap0.docs.filter(function (x) { var st = x.data().status; return !st || st === 'approved'; }) };
+    snap.empty = !snap.docs.length; snap.size = snap.docs.length;
     if (snap.empty) {
       throw new Error('Tidak menemukan akun pemilik (owner) di Firestore. Pastikan aplikasi web sudah pernah dibuka dan login minimal sekali.');
     }
@@ -133,6 +135,8 @@ function alreadyProcessed(sid, sig) {
 function saveTx(sid, kind, obj, sig) {
   obj.wa = sig;
   obj.createdAt = Date.now();
+  /* sama dengan aplikasi: transaksi hari ini ditandai shift yang sedang dibuka */
+  if (kind !== 'mv') { var op = todayOpen(sid); if (op && obj.date === todayStr() && !obj.shift) obj.shift = op.shift; }
   return db.collection(P(sid, kind === 'mv' ? 'mv' : 'tx')).add(obj).then(function (ref) {
     /* bayar "utang": buat catatan piutang yang terhubung ke transaksi ini */
     if (kind !== 'mv' && obj.pay === 'utang') {
@@ -275,6 +279,364 @@ function saldoText(sid, judul) {
 }
 function pad2(n) { return (n < 10 ? '0' : '') + n; }
 function todayStr() { var d = new Date(); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+
+/* ---------- pembukaan kas + shift (sama dengan menu "Buka Kas" di aplikasi) ---------- */
+function todayOpen(sid) {
+  var st = settingsByShop[sid] || {}, t = todayStr();
+  var o = (Array.isArray(st.opens) ? st.opens : []).filter(function (x) { return x && x.date === t; }).sort(function (a, b) { return (a.at || 0) - (b.at || 0); });
+  return o.length ? o[o.length - 1] : null;
+}
+function todayClosed(sid) {
+  var st = settingsByShop[sid] || {}, t = todayStr(), o = todayOpen(sid);
+  var c = (Array.isArray(st.closings) ? st.closings : []).filter(function (x) { return x && x.date === t; })[0];
+  return !!c && (!o || (c.at || 0) >= (o.at || 0));
+}
+function shiftLbl(x) { return x === 'malam' ? 'Malam' : 'Pagi'; }
+function jamStr(ts) { var d = new Date(ts || Date.now()); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
+function kasStatusLine(sid) {
+  var o = todayOpen(sid);
+  if (todayClosed(sid)) return 'Kas sudah ditutup';
+  if (o) return 'Kas sedang dibuka (shift ' + shiftLbl(o.shift) + ', modal ' + rp(o.modal) + ', jam ' + jamStr(o.at) + ')';
+  return 'Kas belum dibuka';
+}
+
+/* ---------- stok barang (produk Kasir, tersimpan di Firebase: shops/{shopId}/products) ---------- */
+var STOK_ADD_RE = /^(tambah|kurang)\s+stok\s+(.+?)\s+(\d+)(?:\s*@\s*(\d[\d.]*))?(?:\s+jual\s+(\d[\d.]*))?\s*$/i;
+/* ekor opsional: "tanpa kas" (tidak dicatat) atau "dari NAMA REKENING" (bawaan: kas laci) */
+function splitTail(ln) {
+  var o = { src: 'kas', skip: false, bad: null }, x = String(ln).trim(), m;
+  if ((m = x.match(/\s+tanpa\s+kas\s*$/i))) { o.skip = true; x = x.slice(0, m.index); }
+  else if ((m = x.match(/(?<=\d)\s+dari\s+(.+?)\s*$/i))) { o.src = m[1].trim().toLowerCase(); x = x.slice(0, m.index); }
+  o.line = x; return o;
+}
+var STOK_MASUK_RE = /^stok\s+masuk\s*(\r?\n|$)/i;
+var STOK_LOW_RE = /^(stok\s+(menipis|habis|tipis)|cek\s+stok\s+(menipis|habis))\s*$/i;
+var STOK_CEK_RE = /^(cek\s+stok|stok)(?:\s+(.+))?\s*$/i;
+function isStokCmd(t) { return STOK_ADD_RE.test(splitTail(t).line) || STOK_MASUK_RE.test(t) || STOK_LOW_RE.test(t) || /^cek\s+stok\b/i.test(t) || /^stok\s+\S/i.test(t) && !/^stok\s+masuk/i.test(t); }
+function getProducts(sid) {
+  return db.collection(P(sid, 'products')).get().then(function (sn) { return sn.docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); }); });
+}
+function findProd(list, q) {
+  var k = String(q).trim().toLowerCase();
+  var ex = list.filter(function (p) { return String(p.name || '').toLowerCase() === k || (p.bc && String(p.bc) === k); });
+  if (ex.length === 1) return { p: ex[0] };
+  var sub = list.filter(function (p) { return String(p.name || '').toLowerCase().indexOf(k) >= 0; });
+  if (sub.length === 1) return { p: sub[0] };
+  if (sub.length > 1) return { many: sub };
+  return { none: true };
+}
+function stokLine(p) { var low = (+p.stock || 0) <= (+p.min || 0); return (low ? '⚠️ ' : '• ') + p.name + ': ' + (+p.stock || 0) + (low ? ' (menipis)' : ''); }
+async function stokLowText(sid) {
+  var list = await getProducts(sid);
+  var low = list.filter(function (p) { return (+p.stock || 0) <= (+p.min || 0); }).sort(function (a, b) { return (a.stock || 0) - (b.stock || 0); });
+  if (!list.length) return '📦 Belum ada produk di Firebase. Buka Kasir di aplikasi sekali agar produknya tersinkron.';
+  if (!low.length) return '📦 Semua stok aman (' + list.length + ' produk).';
+  return '📦 *Stok menipis / habis (' + low.length + ')*\n' + low.slice(0, 40).map(stokLine).join('\n');
+}
+async function stokLowWarn(sid) {
+  try {
+    var list = await getProducts(sid);
+    var low = list.filter(function (p) { return (+p.stock || 0) <= (+p.min || 0); }).sort(function (a, b) { return (a.stock || 0) - (b.stock || 0); });
+    return low.length ? '📦 *Stok menipis (' + low.length + '):*\n' + low.slice(0, 15).map(stokLine).join('\n') + (low.length > 15 ? '\n…dan ' + (low.length - 15) + ' lagi. Ketik: stok menipis' : '') : '';
+  } catch (e) { return ''; }
+}
+async function stokCommand(sid, text, msgId) {
+  var t = text.trim();
+  if (STOK_LOW_RE.test(t)) return stokLowText(sid);
+  var list = await getProducts(sid);
+  if (!list.length) return '📦 Belum ada produk di Firebase. Buka Kasir di aplikasi sekali (pakai akun pemilik) agar produknya tersinkron.';
+  var FV = admin.firestore.FieldValue, items = [], accsS = await refreshAccs(sid);
+  if (STOK_MASUK_RE.test(t)) {
+    var ls = t.split(/\r?\n/).slice(1).map(function (x) { return x.trim(); }).filter(Boolean).slice(0, 40);
+    if (!ls.length) return '📦 Contoh stok masuk banyak barang:\nstok masuk\nPulsa 5rb 20\nKabel USB 10\nCharger 5 @35000 jual 50000';
+    items = ls.map(function (ln0) { var tl = splitTail(ln0), ln = tl.line; var m = ln.match(/^(.+?)\s+(\d+)(?:\s*@\s*(\d[\d.]*))?(?:\s+jual\s+(\d[\d.]*))?$/i); return m ? { q: m[1], n: +m[2], buy: m[3] ? +String(m[3]).replace(/\./g, '') : null, sell: m[4] ? +String(m[4]).replace(/\./g, '') : null, sign: 1, raw: ln, tail: tl } : { bad: ln0 }; });
+  } else if (STOK_ADD_RE.test(splitTail(t).line)) {
+    var tl0 = splitTail(t), a = tl0.line.match(STOK_ADD_RE);
+    items = [{ q: a[2], n: +a[3], buy: a[4] ? +String(a[4]).replace(/\./g, '') : null, sell: a[5] ? +String(a[5]).replace(/\./g, '') : null, sign: a[1].toLowerCase() === 'kurang' ? -1 : 1, raw: t, tail: tl0 }];
+  } else {
+    var c = t.match(STOK_CEK_RE), q = c && c[2] ? c[2].trim() : '';
+    if (!q) return '📦 *Perintah stok:*\n• stok masuk (lalu satu barang per baris: Nama jumlah)\n• tambah stok NAMA 10 [@harga beli] [jual harga jual] [dari BRI | tanpa kas]\n• kurang stok NAMA 2\n• cek stok NAMA\n• stok menipis';
+    var f = findProd(list, q);
+    if (f.none) return '📦 Produk "' + q + '" tidak ditemukan.';
+    if (f.many) return '📦 Ada beberapa yang cocok:\n' + f.many.slice(0, 10).map(stokLine).join('\n') + '\nTulis nama lebih lengkap.';
+    return '📦 ' + f.p.name + '\nStok: ' + (+f.p.stock || 0) + ' (batas minimum ' + (+f.p.min || 0) + ')\nHarga jual: ' + rp(f.p.sell) + ' · beli: ' + rp(f.p.buy);
+  }
+  var batch = db.batch(), out = [], ok = 0, now = Date.now(), buys = [];
+  items.forEach(function (it, i) {
+    if (it.bad) { out.push('⚠️ Baris tidak dikenali: ' + shorten(it.bad)); return; }
+    if (!(it.n > 0)) { out.push('⚠️ Jumlah harus lebih dari 0: ' + shorten(it.raw)); return; }
+    var f = findProd(list, it.q);
+    if (f.none) { out.push('⚠️ Tidak ditemukan: ' + it.q); return; }
+    if (f.many) { out.push('⚠️ "' + it.q + '" cocok dengan ' + f.many.length + ' produk (' + f.many.slice(0, 3).map(function (x) { return x.name; }).join(', ') + '). Tulis lebih lengkap.'); return; }
+    var p = f.p, d = it.sign * it.n, upd = { stock: FV.increment(d), updatedAt: now, by: 'wa-bot' };
+    if (it.buy && it.sign > 0) upd.buy = it.buy;
+    if (it.sell && it.sign > 0) upd.sell = it.sell;
+    batch.update(db.doc(P(sid, 'products/' + p.id)), upd);
+    batch.create(db.doc(P(sid, 'stoklog/' + msgId + '_' + i)), { prod: p.id, name: p.name, d: d, at: now, wa: msgId });
+    var after = (+p.stock || 0) + d; p.stock = after;
+    if (d > 0 && it.buy && it.tail && !it.tail.skip) {
+      var src = 'kas', srcLbl = 'kas laci';
+      if (it.tail.src !== 'kas') {
+        var ac = accsS.filter(function (x) { return String(x.name || '').toLowerCase() === it.tail.src; })[0] || accsS.filter(function (x) { return String(x.name || '').toLowerCase().indexOf(it.tail.src) >= 0; })[0];
+        if (ac) { src = ac.id; srcLbl = ac.name; } else { out.push('⚠️ Rekening "' + it.tail.src + '" tidak ditemukan, pembelian tidak dicatat ke kas.'); src = null; }
+      }
+      if (src) { buys.push({ obj: { date: todayStr(), type: 'keluar', name: 'Beli stok: ' + p.name + ' ×' + it.n, amount: it.buy * it.n, fee: 0, komisi: 0, bf: 0, acc: src, stok: true, note: 'Bot · beli stok' }, i: i }); it.buyLbl = ' · tercatat ' + rp(it.buy * it.n) + ' dari ' + srcLbl; }
+    }
+    ok++; out.push((d > 0 ? '✅ ' : '➖ ') + p.name + ' ' + (d > 0 ? '+' : '') + d + ' → stok ' + after + (it.buy && d > 0 ? ' · beli ' + rp(it.buy) : '') + (it.sell && d > 0 ? ' · jual ' + rp(it.sell) : '') + (it.buyLbl || '') + (after <= (+p.min || 0) ? ' ⚠️ menipis' : ''));
+  });
+  if (ok) {
+    try { await batch.commit(); }
+    catch (e) { if (e && (e.code === 6 || /already exists/i.test(e.message || ''))) return '📦 Pesan ini sudah diproses sebelumnya.'; throw e; }
+    for (var bi = 0; bi < buys.length; bi++) await saveTx(sid, 'tx', buys[bi].obj, 'bot:' + msgId + ':stok' + buys[bi].i);
+  }
+  return (ok ? '📦 *Stok diperbarui (' + ok + ')*\n' : '📦 Tidak ada yang diubah.\n') + out.join('\n');
+}
+
+/* ---------- persetujuan pendaftar baru (hanya dari toko utama) ---------- */
+var PEND_RE = /^(pendaftar|daftar\s+pendaftar)\s*$/i;
+var APPR_RE = /^(setujui|setuju|tolak)\s+(.+)$/i;
+async function pendingList() {
+  var sn = await db.collection('users').where('status', '==', 'pending').limit(30).get();
+  return sn.docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); }).sort(function (a, b) { return (a.createdAt || 0) - (b.createdAt || 0); });
+}
+async function pendingText() {
+  var L = await pendingList();
+  if (!L.length) return '👤 Tidak ada pendaftar yang menunggu.';
+  return '👤 *Pendaftar menunggu (' + L.length + ')*\n' + L.map(function (u, i) { return (i + 1) + '. ' + (u.name || 'Tanpa nama') + ' — ' + (u.email || '') ; }).join('\n') + '\n\nBalas: *setujui 1* atau *tolak 1* (nomor dari daftar), atau *setujui semua*.';
+}
+async function approveCmd(text) {
+  var m = text.match(APPR_RE), yes = m[1].toLowerCase() !== 'tolak', arg = m[2].trim().toLowerCase();
+  var L = await pendingList(), pick = [];
+  if (arg === 'semua') pick = L;
+  else if (/^\d+$/.test(arg)) { var u = L[+arg - 1]; if (u) pick = [u]; }
+  else pick = L.filter(function (u) { return String(u.email || '').toLowerCase() === arg; });
+  if (!pick.length) return '👤 Tidak ada pendaftar yang cocok. Ketik *pendaftar* untuk melihat daftar terbaru.';
+  for (var i = 0; i < pick.length; i++) await db.doc('users/' + pick[i].id).update({ status: yes ? 'approved' : 'rejected', approvedAt: Date.now(), approvedBy: 'wa-bot' });
+  return '👤 ' + (yes ? 'Disetujui: ' : 'Ditolak: ') + pick.map(function (u) { return u.name || u.email; }).join(', ');
+}
+var PEND_SEEN = path.join(ROOT, 'pendaftar-state.json');
+var pendBusy = false;
+async function cekPendaftar() {
+  if (pendBusy || !curSock || !curSock.user || !ownShopId) return;
+  pendBusy = true;
+  try {
+    var L = await pendingList(), seen = {};
+    try { seen = JSON.parse(fs.readFileSync(PEND_SEEN, 'utf8')) || {}; } catch (e) {}
+    var fresh = L.filter(function (u) { return !seen[u.id]; });
+    if (fresh.length) {
+      var me = String(curSock.user.id).split(':')[0].split('@')[0] + '@s.whatsapp.net';
+      await curSock.sendMessage(me, { text: '👤 *Pendaftar baru menunggu persetujuan (' + fresh.length + ')*\n' + fresh.map(function (u) { return '• ' + (u.name || 'Tanpa nama') + ' — ' + (u.email || ''); }).join('\n') + '\n\nKetik *pendaftar* lalu *setujui 1* atau *tolak 1*.' });
+      fresh.forEach(function (u) { seen[u.id] = 1; });
+      try { fs.writeFileSync(PEND_SEEN, JSON.stringify(seen)); } catch (e) {}
+    }
+  } catch (e) { console.error('[PERINGATAN] cek pendaftar gagal:', e && e.message ? e.message : e); }
+  pendBusy = false;
+}
+/* buat meta/admin bila belum ada (pemilik utama = admin yang boleh menyetujui lewat aplikasi) */
+async function ensureAdmin() {
+  try {
+    var sid = await resolveShopId();
+    var d = await db.doc('meta/admin').get();
+    if (!d.exists) { await db.doc('meta/admin').set({ uid: sid, by: 'wa-bot', at: Date.now() }); console.log('meta/admin dibuat untuk akun utama.'); }
+  } catch (e) { console.error('[PERINGATAN] meta/admin belum bisa dibuat:', e && e.message ? e.message : e); }
+}
+
+/* ---------- peringatan saldo menipis (otomatis, tanpa menunggu rekap malam) ---------- */
+var SALDO_STATE = path.join(ROOT, 'saldo-state.json');
+var saldoBusy = false;
+function readJson(f) { try { return JSON.parse(fs.readFileSync(f, 'utf8')) || {}; } catch (e) { return {}; } }
+function saldoSig(t) { return String(t).replace(/Rp\s?[\d.\-−]+/g, '#').replace(/\d+/g, '#'); }
+async function cekSaldo() {
+  if (saldoBusy || !curSock || !curSock.user) return;
+  var h = new Date().getHours(); if (h < 7 || h >= 22) return;
+  saldoBusy = true;
+  try {
+    var list = rekapTargets(), st = readJson(SALDO_STATE), td = todayStr(), seen = {};
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i], key = t.sid + '|' + t.jid; if (seen[key]) continue; seen[key] = 1;
+      await refreshAccs(t.sid);
+      var w = await lowWarn(t.sid);
+      var rec = st[key] || {};
+      if (rec.date !== td) rec = { date: td, sigs: [] };
+      if (!w) { st[key] = rec; continue; }
+      var sg = saldoSig(w);
+      if (rec.sigs.indexOf(sg) < 0 && rec.sigs.length < 3) {
+        await curSock.sendMessage(t.jid, { text: w + '\n\n_Pengingat otomatis ' + t.nama + '_' });
+        rec.sigs.push(sg);
+        console.log(new Date().toLocaleString('id-ID'), '- peringatan saldo terkirim ke', t.nama);
+      }
+      st[key] = rec;
+    }
+    try { fs.writeFileSync(SALDO_STATE, JSON.stringify(st)); } catch (e) {}
+  } catch (e) { console.error('[PERINGATAN] cek saldo gagal:', e && e.message ? e.message : e); }
+  saldoBusy = false;
+}
+
+/* ---------- cadangan data (otomatis tiap Minggu malam, atau ketik: cadangan) ---------- */
+var BACKUP_RE = /^(cadangan|backup)(\s+data)?\s*$/i;
+var BACKUP_STATE = path.join(ROOT, 'cadangan-state.json');
+function csvCell(v) { v = v === undefined || v === null ? '' : String(v); return /[",\n\r;]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+function txCsv(list, accs) {
+  var nm = {}; (accs || []).forEach(function (a) { nm[a.id] = a.name; });
+  var head = ['Tanggal', 'Jenis', 'Nama', 'Nominal', 'Admin', 'Komisi', 'Akun', 'Shift', 'Catatan'];
+  var rows = list.slice().sort(function (a, b) { return (a.date || '') < (b.date || '') ? -1 : (a.date || '') > (b.date || '') ? 1 : (a.createdAt || 0) - (b.createdAt || 0); }).map(function (t) {
+    return [t.date, t.type, t.name || '', t.amount || 0, t.fee || 0, t.komisi || 0, nm[t.acc] || (t.acc === 'kas' ? 'Kas laci' : t.acc || ''), t.shift || '', t.note || ''].map(csvCell).join(',');
+  });
+  return '﻿' + head.join(',') + '\r\n' + rows.join('\r\n') + '\r\n';
+}
+async function buildBackup(sid) {
+  var cols = ['tx', 'acc', 'mv', 'debts', 'products'], out = { dibuat: new Date().toISOString(), shopId: sid, versi: 'bot-v20' };
+  for (var i = 0; i < cols.length; i++) {
+    var sn = await db.collection(P(sid, cols[i])).get();
+    out[cols[i]] = sn.docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
+  }
+  var st = await db.doc(P(sid, 'settings/main')).get(); out.settings = st.exists ? st.data() : {};
+  return out;
+}
+async function sendBackup(sock, jid, sid, nama) {
+  var b = await buildBackup(sid), td = todayStr();
+  await sock.sendMessage(jid, { text: '💾 *Cadangan data ' + nama + '* (' + td + ')\n• Transaksi: ' + b.tx.length + '\n• Rekening: ' + b.acc.length + '\n• Utang piutang: ' + b.debts.length + '\n• Produk: ' + b.products.length + '\n\nSimpan 2 file berikut di tempat aman. Excel: buka file .csv.' });
+  await sock.sendMessage(jid, { document: Buffer.from(txCsv(b.tx, b.acc), 'utf8'), mimetype: 'text/csv', fileName: 'transaksi-dcell-' + td + '.csv' });
+  await sock.sendMessage(jid, { document: Buffer.from(JSON.stringify(b), 'utf8'), mimetype: 'application/json', fileName: 'cadangan-lengkap-dcell-' + td + '.json' });
+}
+var backupBusy = false;
+async function cekCadangan() {
+  if (backupBusy || !curSock || !curSock.user || !ownShopId) return;
+  var now = new Date(); if (now.getDay() !== 0 || now.getHours() < 21) return;
+  var st = readJson(BACKUP_STATE), td = todayStr(); if (st.last === td) return;
+  backupBusy = true;
+  try {
+    var me = String(curSock.user.id).split(':')[0].split('@')[0] + '@s.whatsapp.net';
+    await sendBackup(curSock, me, ownShopId, 'Toko utama');
+    st.last = td; try { fs.writeFileSync(BACKUP_STATE, JSON.stringify(st)); } catch (e) {}
+    console.log(new Date().toLocaleString('id-ID'), '- cadangan mingguan terkirim');
+  } catch (e) { console.error('[PERINGATAN] cadangan gagal:', e && e.message ? e.message : e); }
+  backupBusy = false;
+}
+
+/* ---------- laporan bulanan (otomatis tanggal 1-3, atau ketik: laporan bulan / laporan bulan lalu) ---------- */
+var LAPBLN_RE = /^laporan\s+bulan(\s+(ini|lalu))?\s*$/i;
+var LAP_STATE = path.join(ROOT, 'laporan-state.json');
+var BLN = ['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+function ymAdd(ym, n) { var y = +ym.slice(0, 4), m = +ym.slice(5, 7) - 1 + n; var d = new Date(y, m, 1); return d.getFullYear() + '-' + pad2(d.getMonth() + 1); }
+function ymLabel(ym) { return BLN[+ym.slice(5, 7) - 1] + ' ' + ym.slice(0, 4); }
+function monthStats(sid, ym) {
+  var from = ym + '-01', to = ym + '-31';
+  return Promise.all([
+    db.collection(P(sid, 'tx')).where('date', '>=', from).where('date', '<=', to).get(),
+    db.collection(P(sid, 'mv')).where('date', '>=', from).where('date', '<=', to).get()
+  ]).then(function (r) {
+    var accs = accsByShop[sid] || [];
+    var s = { n: 0, omzet: 0, keluar: 0, stok: 0, retur: 0, masuk: 0, laba: 0, kN: 0, kTot: 0, byType: {}, byDay: {} };
+    r[0].docs.forEach(function (d) {
+      var x = d.data(), e = WA.fx(x, accs), ly = WA.lk(x.type), a = +x.amount || 0;
+      s.laba += e.laba; s.byDay[x.date] = (s.byDay[x.date] || 0) + e.laba;
+      if (ly === 'keluar') { if (x.stok) s.stok += a; else if (x.retur) s.retur += a; else s.keluar += a; return; }
+      if (ly === 'masuk') { s.masuk += a; return; }
+      s.n++;
+      if (x.ksr) { s.kN++; s.kTot += a; }
+      if (ly !== 'isi' && ly !== 'jual') s.omzet += a;
+      var label = (TYPES[x.type] || {}).label || x.type;
+      s.byType[label] = (s.byType[label] || 0) + 1;
+    });
+    r[1].docs.forEach(function (d) { var m = d.data(); if (m.type === 'pindah') { var f = +m.fee || 0; s.keluar += f; s.laba -= f; s.byDay[m.date] = (s.byDay[m.date] || 0) - f; } });
+    return s;
+  });
+}
+function monthText(sid, ym) {
+  return Promise.all([monthStats(sid, ym), monthStats(sid, ymAdd(ym, -1)), getDebts(sid)]).then(function (r) {
+    var s = r[0], pv = r[1], ds = r[2];
+    var L = ['📅 *Laporan bulan ' + ymLabel(ym) + '*', ''];
+    if (!s.n && !s.keluar && !s.masuk && !s.stok) { L.push('Belum ada transaksi bulan ini.'); return L.join('\n'); }
+    L.push('• Jumlah transaksi: ' + s.n);
+    L.push('• Omzet layanan: ' + rp(s.omzet));
+    if (s.kN) L.push('• Penjualan dari Kasir: ' + s.kN + ' (' + rp(s.kTot) + ')');
+    if (s.masuk) L.push('• Pemasukan lain: ' + rp(s.masuk));
+    L.push('• Pengeluaran: ' + rp(s.keluar));
+    if (s.stok) L.push('• Belanja stok: ' + rp(s.stok) + ' (tidak mengurangi laba)');
+    if (s.retur) L.push('• Retur ke pelanggan: ' + rp(s.retur));
+    var cmp = '';
+    if (pv.laba) { var pc = Math.round((s.laba - pv.laba) / Math.abs(pv.laba) * 100); cmp = ' (' + (pc >= 0 ? '▲ ' : '▼ ') + Math.abs(pc) + '% dari ' + BLN[+ymAdd(ym, -1).slice(5, 7) - 1] + ')'; }
+    L.push('• *Laba bersih: ' + rp(s.laba) + '*' + cmp);
+    var tp = Object.keys(s.byType).sort(function (a, b) { return s.byType[b] - s.byType[a]; }).slice(0, 3);
+    if (tp.length) { L.push(''); L.push('*Jenis terbanyak:*'); tp.forEach(function (k) { L.push('• ' + k + ': ' + s.byType[k]); }); }
+    var days = Object.keys(s.byDay).sort(function (a, b) { return s.byDay[b] - s.byDay[a]; });
+    if (days.length && s.byDay[days[0]] > 0) { L.push(''); L.push('🏆 Hari terbaik: ' + (+days[0].slice(8, 10)) + ' ' + BLN[+ym.slice(5, 7) - 1] + ' (laba ' + rp(s.byDay[days[0]]) + ')'); }
+    var pt = 0, ut = 0; ds.forEach(function (d) { var l = debtLeft(d); if (d.kind === 'piutang') pt += l; else ut += l; });
+    if (pt || ut) { L.push(''); L.push('Piutang belum dibayar: ' + rp(pt) + (ut ? ' · Utang kita: ' + rp(ut) : '')); }
+    return L.join('\n');
+  });
+}
+var lapBusy = false;
+async function cekLaporanBulan() {
+  if (lapBusy || !curSock || !curSock.user) return;
+  var now = new Date(); if (now.getDate() > 3 || now.getHours() < 8) return;
+  lapBusy = true;
+  try {
+    var ym = ymAdd(now.getFullYear() + '-' + pad2(now.getMonth() + 1), -1), st = readJson(LAP_STATE), seen = {}, list = rekapTargets();
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i], key = t.sid + '|' + t.jid; if (seen[key]) continue; seen[key] = 1;
+      if (st[key] === ym) continue;
+      await refreshAccs(t.sid);
+      var txt = await monthText(t.sid, ym);
+      await curSock.sendMessage(t.jid, { text: txt + '\n\n_Laporan otomatis ' + t.nama + '_' });
+      st[key] = ym; try { fs.writeFileSync(LAP_STATE, JSON.stringify(st)); } catch (e) {}
+      console.log(new Date().toLocaleString('id-ID'), '- laporan bulanan terkirim ke', t.nama);
+    }
+  } catch (e) { console.error('[PERINGATAN] laporan bulanan gagal:', e && e.message ? e.message : e); }
+  lapBusy = false;
+}
+
+var BUKA_RE = /^buka\s+kas\b/i;
+var STATUSKAS_RE = /^(status\s+kas|cek\s+kas)\s*$/i;
+function bukuLaci(sid) {
+  return Promise.all([
+    db.collection(P(sid, 'acc')).get(), db.collection(P(sid, 'tx')).get(), db.collection(P(sid, 'mv')).get(),
+    db.doc(P(sid, 'settings/main')).get(), getDebts(sid)
+  ]).then(function (r) {
+    var accs = r[0].docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
+    var kasAwal = r[3].exists ? (+r[3].data().kasAwal || 0) : 0;
+    var c = WA.calcBalance(accs, kasAwal, r[1].docs.map(function (d) { return d.data(); }), r[2].docs.map(function (d) { return d.data(); }), r[4]);
+    return { kas: c.kas, st: r[3].exists ? r[3].data() : {} };
+  });
+}
+async function statusKasText(sid) {
+  await refreshAccs(sid);
+  var b = await bukuLaci(sid);
+  return ['💰 *Status kas*', '_' + tgl(todayStr()) + '_', '', '• ' + kasStatusLine(sid), '• Uang di laci (menurut buku): ' + rp(b.kas), '',
+    'Untuk membuka kas: buka kas 500rb pagi'].join('\n');
+}
+async function bukaKas(sid, text) {
+  var toks = text.replace(BUKA_RE, '').trim().split(/\s+/).filter(Boolean);
+  var amt = null, shf = '', samakan = false;
+  toks.forEach(function (t) {
+    var l = t.toLowerCase();
+    if (l === 'pagi' || l === 'malam') shf = l;
+    else if (l === 'samakan' || l === 'sesuaikan') samakan = true;
+    else if (amt === null) amt = WA.waAmount(l);
+  });
+  await refreshAccs(sid);
+  var b = await bukuLaci(sid);
+  if (amt === null || !(amt >= 0)) {
+    return ['🛠️ *Buka kas*', 'Tulis modal awal (uang di laci) dan shift, contoh:', '', 'buka kas 500rb pagi', 'buka kas 300rb malam', '',
+      'Uang di laci menurut buku sekarang: ' + rp(b.kas), 'Tambahkan kata "samakan" bila catatan buku mau disamakan dengan modal awal.'].join('\n');
+  }
+  if (!shf) shf = new Date().getHours() < 15 ? 'pagi' : 'malam';
+  var td = todayStr(), st = b.st, old = Array.isArray(st.opens) ? st.opens : [];
+  var nu = old.filter(function (x) { return !(x && x.date === td && x.shift === shf); })
+    .concat([{ date: td, shift: shf, modal: amt, buku: Math.round(b.kas), by: 'WhatsApp', at: Date.now() }]).slice(-60);
+  var patch = { opens: nu };
+  var d = amt - Math.round(b.kas);
+  if (samakan && d !== 0) patch.kasAwal = (+st.kasAwal || 0) + d;
+  await db.doc(P(sid, 'settings/main')).set(patch, { merge: true });
+  settingsByShop[sid] = Object.assign({}, settingsByShop[sid] || {}, { opens: nu });
+  var L = ['✅ *Kas dibuka*', '_' + tgl(td) + ' · ' + jamStr() + '_', '', '• Shift: ' + shiftLbl(shf), '• Modal awal: ' + rp(amt)];
+  if (d === 0) L.push('• Sama dengan catatan buku (' + rp(b.kas) + ')');
+  else if (samakan) L.push('• Catatan buku disamakan: dari ' + rp(b.kas) + ' menjadi ' + rp(amt));
+  else L.push('• Beda ' + rpS(d) + ' dari catatan buku (' + rp(b.kas) + '). Buku tidak diubah. Kirim "buka kas ' + amt + ' ' + shf + ' samakan" bila mau disamakan.');
+  L.push('', 'Transaksi berikutnya hari ini otomatis ditandai shift ' + shiftLbl(shf) + '.');
+  return L.join('\n');
+}
 
 /* ---------- koreksi saldo (samakan catatan dengan uang/saldo yang sebenarnya) ----------
    Sama seperti "Ubah saldo" di aplikasi: selisih dicatat sebagai koreksi saldo awal,
@@ -450,16 +812,23 @@ function ubahTerakhir(sid, text) {
 var REKAP_PATH = path.join(ROOT, 'rekap-state.json');
 function readRekapState() { try { return JSON.parse(fs.readFileSync(REKAP_PATH, 'utf8')) || {}; } catch (e) { return {}; } }
 function writeRekapState(st) { try { fs.writeFileSync(REKAP_PATH, JSON.stringify(st)); } catch (e) { console.error('[PERINGATAN] rekap-state.json tidak bisa ditulis:', e.message); } }
+/* jam pengingat utang piutang: bawaan 08.00; tulis "ingatJam": false di toko.json untuk mematikan */
+function ingatOf(o) {
+  var j = o ? o.ingatJam : undefined;
+  if (j === false || j === null) return false;
+  if (j === undefined || isNaN(+j)) return 8;
+  return +j;
+}
 function rekapTargets() {
   var out = [], u = readTokoFile().utama, jamU = (u && u.rekapJam !== undefined) ? u.rekapJam : 23;
   if (ownShopId && jamU !== false && jamU !== null && !isNaN(+jamU) && curSock && curSock.user && curSock.user.id) {
     var me = String(curSock.user.id).split(':')[0].split('@')[0];
-    out.push({ sid: ownShopId, jid: me + '@s.whatsapp.net', jam: +jamU, nama: 'Toko utama' });
+    out.push({ sid: ownShopId, jid: me + '@s.whatsapp.net', jam: +jamU, nama: 'Toko utama', ingat: ingatOf(u) });
   }
   tokoList.forEach(function (t) {
     if (t.rekapJam === undefined || t.rekapJam === null || t.rekapJam === false || isNaN(+t.rekapJam)) return;
     var n = TOKO.normNum(t.nomor); if (!n) return;
-    out.push({ sid: t.shopId, jid: n + '@s.whatsapp.net', jam: +t.rekapJam, nama: t.nama });
+    out.push({ sid: t.shopId, jid: n + '@s.whatsapp.net', jam: +t.rekapJam, nama: t.nama, ingat: ingatOf(t) });
   });
   return out;
 }
@@ -474,8 +843,9 @@ function cekRekap() {
   due.reduce(function (p, t) {
     return p.then(function () {
       return refreshAccs(t.sid).then(function () { return Promise.all([todayText(t.sid), saldoText(t.sid, 'Saldo ' + t.nama)]); }).then(function (r) {
-        return lowWarn(t.sid).then(function (w) {
-          return sock.sendMessage(t.jid, { text: '🌙 *Rekap harian ' + t.nama + '*\n\n' + r[0] + '\n\n' + r[1] + (w ? '\n\n' + w : '') });
+        return Promise.all([lowWarn(t.sid), stokLowWarn(t.sid)]).then(function (ws) {
+          var w = ws[0], w2 = ws[1];
+          return sock.sendMessage(t.jid, { text: '🌙 *Rekap harian ' + t.nama + '*\n\n' + r[0] + '\n\n' + r[1] + (w ? '\n\n' + w : '') + (w2 ? '\n\n' + w2 : '') });
         });
       }).then(function () { st[t.sid + '|' + t.jid] = today; writeRekapState(st); console.log(new Date().toLocaleString('id-ID'), '- rekap harian terkirim ke', t.nama); })
         .catch(function (e) { console.error('[PERINGATAN] Rekap harian ' + t.nama + ' gagal:', e && e.message ? e.message : e); });
@@ -483,6 +853,46 @@ function cekRekap() {
   }, Promise.resolve()).then(function () { rekapBusy = false; }, function () { rekapBusy = false; });
 }
 var rekapTimer = null;
+
+/* ---------- pengingat utang piutang jatuh tempo ---------- */
+var ingatBusy = false;
+function ingatText(ds) {
+  var td = todayStr(), soon = new Date(); soon.setDate(soon.getDate() + 3);
+  var lim = soon.getFullYear() + '-' + pad2(soon.getMonth() + 1) + '-' + pad2(soon.getDate());
+  var open = ds.filter(function (d) { return debtLeft(d) > 0 && d.due && d.due <= lim; });
+  if (!open.length) return '';
+  open.sort(function (a, b) { return a.due < b.due ? -1 : 1; });
+  function line(d) {
+    var n = Math.round((new Date(d.due + 'T00:00:00') - new Date(td + 'T00:00:00')) / 864e5);
+    var tag = n < 0 ? 'terlambat ' + (-n) + ' hari' : n === 0 ? 'jatuh tempo HARI INI' : 'tempo ' + n + ' hari lagi';
+    return '• ' + (d.name || 'Tanpa nama') + ': ' + rp(debtLeft(d)) + ' (' + tag + ')';
+  }
+  var P1 = open.filter(function (d) { return d.kind === 'piutang'; }), U1 = open.filter(function (d) { return d.kind !== 'piutang'; });
+  var L = ['⏰ *Pengingat utang piutang*', ''];
+  if (P1.length) { L.push('*Tagih (piutang)*'); P1.forEach(function (d) { L.push(line(d)); }); L.push(''); }
+  if (U1.length) { L.push('*Bayar (utang kita)*'); U1.forEach(function (d) { L.push(line(d)); }); L.push(''); }
+  L.push('_Bayar: "bayar piutang budi 50rb" · Lunas: "lunas budi"_');
+  return L.join('\n');
+}
+function cekIngat() {
+  if (ingatBusy || !curSock) return;
+  var now = new Date(), today = todayStr(), st = readRekapState(), list = rekapTargets();
+  var due = list.filter(function (t) { return t.ingat !== false && now.getHours() >= t.ingat && st['ingat|' + t.sid + '|' + t.jid] !== today; });
+  if (!due.length) return;
+  ingatBusy = true;
+  var sock = curSock;
+  due.reduce(function (p, t) {
+    return p.then(function () {
+      return getDebts(t.sid).then(function (ds) {
+        var txt = ingatText(ds);
+        return (txt ? sock.sendMessage(t.jid, { text: txt }) : Promise.resolve()).then(function () {
+          var st2 = readRekapState(); st2['ingat|' + t.sid + '|' + t.jid] = today; writeRekapState(st2);
+          if (txt) console.log(new Date().toLocaleString('id-ID'), '- pengingat utang terkirim ke', t.nama);
+        });
+      }).catch(function (e) { console.error('[PERINGATAN] Pengingat utang ' + t.nama + ' gagal:', e && e.message ? e.message : e); });
+    });
+  }, Promise.resolve()).then(function () { ingatBusy = false; }, function () { ingatBusy = false; });
+}
 
 /* ---------- transaksi hari ini ---------- */
 var TODAY_RE = /^(cek\s+)?transaksi(\s+hari\s*ini)?\s*$/i;
@@ -496,13 +906,14 @@ function todayText(sid) {
     var mvs = r[1].docs.map(function (d) { return d.data(); });
     /* sama dengan kartu "Transaksi hari ini" di aplikasi: pemasukan dan pengeluaran
        bukan transaksi layanan, jadi tidak ikut dihitung di jumlah transaksi */
-    var n = 0, keluar = 0, masuk = 0, laba = 0, omzet = 0, byType = {};
+    var n = 0, keluar = 0, masuk = 0, laba = 0, omzet = 0, byType = {}, kN = 0, kTot = 0;
     txs.forEach(function (x) {
       var e = WA.fx(x, accsByShop[sid] || []), ly = WA.lk(x.type);
       laba += e.laba;
       if (ly === 'keluar') { keluar += +x.amount || 0; return; }
       if (ly === 'masuk') { masuk += +x.amount || 0; return; }
       n++;
+      if (x.ksr) { kN++; kTot += +x.amount || 0; }
       if (ly !== 'isi' && ly !== 'jual') omzet += +x.amount || 0;
       var label = (TYPES[x.type] || {}).label || x.type;
       byType[label] = (byType[label] || 0) + 1;
@@ -512,7 +923,9 @@ function todayText(sid) {
     var L = ['📊 *Transaksi hari ini*'];
     L.push('_' + tgl(t) + '_');
     L.push('');
+    L.push('• ' + kasStatusLine(sid));
     L.push('• Jumlah transaksi: ' + n + (mvs.length ? ' (+ ' + mvs.length + ' pindah saldo)' : ''));
+    if (kN) L.push('• Penjualan dari Kasir: ' + kN + ' (' + rp(kTot) + ')');
     if (masuk) L.push('• Pemasukan: ' + rp(masuk));
     L.push('• Omzet: ' + rp(omzet));
     L.push('• Pengeluaran: ' + rp(keluar));
@@ -590,7 +1003,7 @@ async function start() {
       }
     } else if (u.connection === 'open') {
       console.log('\n✅ Tersambung ke WhatsApp. Bot siap mencatat transaksi.\n');
-      if (!rekapTimer) { rekapTimer = setInterval(cekRekap, 60000); setTimeout(cekRekap, 15000); }
+      if (!rekapTimer) { rekapTimer = setInterval(function () { cekRekap(); cekIngat(); }, 60000); setInterval(cekPendaftar, 120000); setInterval(cekSaldo, 600000); setInterval(cekCadangan, 900000); setInterval(cekLaporanBulan, 1800000); setTimeout(cekLaporanBulan, 70000); setTimeout(cekSaldo, 45000); setTimeout(cekRekap, 15000); setTimeout(cekIngat, 25000); setTimeout(ensureAdmin, 5000); setTimeout(cekPendaftar, 35000); }
     }
   });
 
@@ -748,7 +1161,7 @@ async function handleMessage(sock, msg) {
   var text = (m && (m.conversation || (m.extendedTextMessage && m.extendedTextMessage.text))) || '';
   text = text.trim();
   if (!text) return;
-  if (/^(🌙|💰|📊|✅|⚠️|🗑️|🛠️)/.test(text)) return;   /* balasan/rekap dari bot sendiri, jangan dibaca sebagai transaksi */
+  if (/^(🌙|💰|📊|✅|⚠️|🗑️|🛠️|📦|👤)/.test(text)) return;   /* balasan/rekap dari bot sendiri, jangan dibaca sebagai transaksi */
   var tag = toko ? '[' + toko.nama + '] ' : '';
 
   if (SALDO_RE.test(text)) {
@@ -779,6 +1192,55 @@ async function handleMessage(sock, msg) {
       var txh = HAPUS_RE.test(text) ? await hapusTerakhir(sid) : await ubahTerakhir(sid, text);
       await sock.sendMessage(jid, { text: txh }, { quoted: msg });
       console.log(new Date().toLocaleString('id-ID'), '-', tag + (HAPUS_RE.test(text) ? 'hapus terakhir.' : 'ubah terakhir.'));
+    } catch (e) {
+      await sock.sendMessage(jid, { text: '⚠️ Gagal: ' + e.message }, { quoted: msg });
+    }
+    return;
+  }
+
+  if ((BUKA_RE.test(text) || STATUSKAS_RE.test(text)) && text.split(/\r?\n/).length === 1) {
+    try {
+      var txb = BUKA_RE.test(text) ? await bukaKas(sid, text) : await statusKasText(sid);
+      await sock.sendMessage(jid, { text: txb }, { quoted: msg });
+      console.log(new Date().toLocaleString('id-ID'), '-', tag + (BUKA_RE.test(text) ? 'buka kas.' : 'status kas.'));
+    } catch (e) {
+      await sock.sendMessage(jid, { text: '⚠️ Gagal: ' + e.message }, { quoted: msg });
+    }
+    return;
+  }
+
+  if (LAPBLN_RE.test(text)) {
+    try {
+      var lm = text.match(LAPBLN_RE), nowL = new Date(), cur = nowL.getFullYear() + '-' + pad2(nowL.getMonth() + 1);
+      var ymL = lm[2] && lm[2].toLowerCase() === 'lalu' ? ymAdd(cur, -1) : cur;
+      await refreshAccs(sid);
+      await sock.sendMessage(jid, { text: await monthText(sid, ymL) }, { quoted: msg });
+    } catch (e) { await sock.sendMessage(jid, { text: '⚠️ Gagal: ' + e.message }, { quoted: msg }); }
+    return;
+  }
+
+  if (BACKUP_RE.test(text) && sid === ownShopId) {
+    try { await sock.sendMessage(jid, { text: '💾 Menyiapkan cadangan...' }, { quoted: msg }); await sendBackup(sock, jid, sid, 'Toko utama'); }
+    catch (e) { await sock.sendMessage(jid, { text: '⚠️ Gagal: ' + e.message }, { quoted: msg }); }
+    return;
+  }
+
+  if (isStokCmd(text) && (STOK_MASUK_RE.test(text) || text.split(/\r?\n/).length === 1)) {
+    try {
+      var txs = await stokCommand(sid, text, msg.key.id);
+      await sock.sendMessage(jid, { text: txs }, { quoted: msg });
+      console.log(new Date().toLocaleString('id-ID'), '-', tag + 'stok: ' + text.split(/\r?\n/)[0].slice(0, 40));
+    } catch (e) {
+      await sock.sendMessage(jid, { text: '⚠️ Gagal: ' + e.message }, { quoted: msg });
+    }
+    return;
+  }
+
+  if (sid === ownShopId && text.split(/\r?\n/).length === 1 && (PEND_RE.test(text) || APPR_RE.test(text))) {
+    try {
+      var txp = PEND_RE.test(text) ? await pendingText() : await approveCmd(text);
+      await sock.sendMessage(jid, { text: txp }, { quoted: msg });
+      console.log(new Date().toLocaleString('id-ID'), '-', tag + 'pendaftar: ' + text.slice(0, 30));
     } catch (e) {
       await sock.sendMessage(jid, { text: '⚠️ Gagal: ' + e.message }, { quoted: msg });
     }
@@ -831,8 +1293,14 @@ async function handleMessage(sock, msg) {
 
   /* banyak baris = banyak transaksi sekaligus */
   var MAX_LINES = 30;
-  var parsed = lines.slice(0, MAX_LINES).map(function (ln) { return { ln: ln, r: waLine(ln, null, accs, settingsByShop[sid]) }; });
-  if (parsed.every(function (x) { return x.r.skip; })) return;   /* obrolan biasa, abaikan */
+  var defDate = null, hdrN = 0, parsed = [];
+  lines.slice(0, MAX_LINES).forEach(function (ln) {
+    var hd = WA.headerDate(ln);
+    if (hd && hd !== 'invalid') { defDate = hd; hdrN++; return; }          /* baris tanggal: berlaku untuk baris di bawahnya */
+    if (hd === 'invalid') { parsed.push({ ln: ln, r: { ok: false, msg: 'Tanggal tidak valid.' } }); return; }
+    parsed.push({ ln: ln, r: waLine(ln, defDate, accs, settingsByShop[sid]) });
+  });
+  if (!parsed.length || parsed.every(function (x) { return x.r.skip; })) return;   /* obrolan biasa, abaikan */
   var out = [], okN = 0, badN = 0;
   for (var k = 0; k < parsed.length; k++) {
     var pr = parsed[k], no = (k + 1) + '. ';
