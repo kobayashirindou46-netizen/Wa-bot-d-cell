@@ -409,3 +409,28 @@ Fitur ini MATI sampai Anda menyalakannya, supaya tidak ada pesan ke pelanggan ta
    diselesaikan ya. Abaikan pesan ini kalau Anda sudah membayar. Terima kasih."
 5. Catatan: status sudah dikirim disimpan di ingat-pelanggan-state.json (di folder bot). Hapus file itu kalau mau mengulang dari awal.
    Pesan otomatis ke banyak orang bisa membuat nomor WhatsApp dibatasi kalau terlalu sering. Pakai seperlunya.
+
+UPDATE bot v22: PENGINGAT TANPA REKAP + NOMOR KONTAK DI PESAN
+-------------------------------------------------------------
+1. Pengingat utang (ke pemilik dan ke pelanggan) sekarang BISA JALAN TANPA rekap harian jam 23.00.
+   Sebelumnya baris toko harus punya "rekapJam" supaya pengingat jalan. Sekarang cukup salah satu dari:
+     "ingatJam": 8          (jam kirim pengingat ke pemilik, angka 0-23)
+     "ingatPelanggan": true (kirim pengingat ke pelanggan yang berutang)
+   Rekap harian tetap hanya jalan kalau "rekapJam" diisi angka. Peringatan saldo dan laporan bulanan juga tetap mengikuti "rekapJam".
+2. Pesan ke pelanggan sekarang memuat baris "Hubungi kami di <nomor> kalau ada pertanyaan."
+   - Untuk baris di "toko": otomatis memakai "nomor" baris itu sendiri (jadi tiap toko menampilkan nomornya sendiri).
+   - Mau nomor lain? Tulis "kontak": "08xxxxxxxxxx" di baris itu.
+   - Untuk bagian "utama": tidak ada nomor otomatis, isi "kontak" sendiri kalau mau.
+3. Pelanggan menerima pesan dari NOMOR BOT. Kalau mereka membalas, balasan masuk ke nomor bot dan tidak diproses.
+4. Contoh baris toko lengkap:
+   { "nama": "buku kas D'CELL", "nomor": "085156584273", "email": "anda@gmail.com", "ingatJam": 8, "ingatPelanggan": true, "namaToko": "D'CELL" }
+   Toko lain cukup menambah baris sendiri dengan nomor, email, dan namaToko masing-masing. Pengaturan tiap baris berdiri sendiri.
+
+UPDATE bot v23: PERPANJANG JATUH TEMPO
+--------------------------------------
+Perintah baru:  tempo budi 7
+  Jatuh tempo catatan Budi menjadi 7 hari lagi dari HARI INI (boleh 1 sampai 365 hari; "7hari" juga boleh).
+  Hitungan pengingat ke pelanggan untuk catatan itu diulang dari awal, jadi pengingat berikutnya mulai sehari sebelum tempo baru.
+  Hanya untuk catatan yang belum lunas. Kalau ada dua catatan dengan nama mirip, tulis nama lebih lengkap.
+Cicilan tetap dicatat dengan:  bayar piutang budi 75rb   (sisa otomatis berkurang, tempo tidak berubah)
+
