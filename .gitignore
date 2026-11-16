@@ -1,0 +1,5 @@
+node_modules/
+session/
+serviceAccountKey.json
+bot.log
+toko.json
