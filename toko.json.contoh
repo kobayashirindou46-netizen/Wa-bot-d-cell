@@ -1,0 +1,8 @@
+{
+  "utama": { "email": "email-akun-anda@gmail.com", "pesanSendiri": false, "ingatPelanggan": false, "namaToko": "Nama toko Anda" },
+  "toko": [
+    { "nama": "Nomor 2 saya", "nomor": "081234567890", "email": "email-akun-anda@gmail.com", "ingatJam": 8, "ingatPelanggan": true, "namaToko": "Nama toko Anda" },
+    { "nama": "Toko Budi", "nomor": "081234567891", "email": "budi@gmail.com" },
+    { "nama": "Toko Sari", "nomor": "6285712345678", "email": "sari@gmail.com" }
+  ]
+}
