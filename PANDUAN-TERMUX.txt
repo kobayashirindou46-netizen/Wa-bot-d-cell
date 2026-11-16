@@ -384,3 +384,28 @@ LAPORAN BULANAN OTOMATIS DAN RETUR (bot v20)
 - Kapan saja bisa diminta: ketik  laporan bulan  (bulan ini) atau  laporan bulan lalu
 - Retur dari Kasir ikut dihitung benar di laba (hanya selisih modal yang berkurang).
 - Pengingat utang jatuh tempo sudah ada sejak versi lama (jam pengingat diatur di toko.json).
+
+PENGINGAT UTANG KE NOMOR PELANGGAN (bot v21)
+--------------------------------------------
+Selain ke nomor Anda, bot bisa mengirim pengingat langsung ke WhatsApp orang yang berutang (piutang).
+Fitur ini MATI sampai Anda menyalakannya, supaya tidak ada pesan ke pelanggan tanpa sepengetahuan Anda.
+
+1. Nyalakan di toko.json (di bagian "utama", atau di baris toko yang bersangkutan):
+     "ingatPelanggan": true
+   Nama toko di pesan (boleh dikosongkan):  "namaToko": "D'CELL"
+   Contoh:  "utama": { "email": "anda@gmail.com", "pesanSendiri": false, "ingatPelanggan": true, "namaToko": "D'CELL" },
+   Simpan, lalu matikan dan nyalakan bot lagi.
+2. Catatan piutang harus punya NOMOR HP dan TANGGAL JATUH TEMPO:
+     piutang budi 150rb tempo 7 081234567890      (nomor boleh 08..., 628..., atau +628...)
+     nomor budi 081234567890                      (menyimpan atau mengganti nomor Budi di catatan yang sudah ada)
+   Nomor juga bisa diisi di aplikasi pada catatan piutang.
+3. Aturan kirim (otomatis, pada jam pengingat, bawaan 08.00; atur dengan "ingatJam" seperti biasa):
+   - Mulai SEHARI SEBELUM jatuh tempo, lalu tiap 3 hari selama belum lunas.
+   - Paling banyak 5 kali per catatan, dan paling banyak 15 pesan per hari. Ada jeda beberapa detik antar pesan.
+   - Hanya piutang (bukan utang kita), hanya yang masih ada sisa, dan hanya yang punya nomor.
+   - Nomor yang tidak memakai WhatsApp dilewati dan dilaporkan.
+   - Setelah selesai, bot mengirim ringkasan ke nomor Anda: siapa yang terkirim dan siapa yang gagal.
+4. Isi pesan: "Halo Budi, ini pengingat dari D'CELL. Piutang Anda Rp150.000 jatuh tempo besok (17-11-2026). Mohon segera
+   diselesaikan ya. Abaikan pesan ini kalau Anda sudah membayar. Terima kasih."
+5. Catatan: status sudah dikirim disimpan di ingat-pelanggan-state.json (di folder bot). Hapus file itu kalau mau mengulang dari awal.
+   Pesan otomatis ke banyak orang bisa membuat nomor WhatsApp dibatasi kalau terlalu sering. Pakai seperlunya.

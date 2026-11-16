@@ -1,0 +1,77 @@
+PANDUAN: BOT UNTUK TOKO LAIN (akun berbeda)
+===========================================
+
+CARA KERJA
+----------
+Satu bot ini bisa melayani beberapa toko. Tiap toko = satu akun pemilik di aplikasi
+Buku Kas yang sama (data tiap toko terpisah, tidak saling terlihat).
+
+- Pesan yang ANDA ketik sendiri tetap dicatat ke toko Anda (seperti biasa).
+- Pemilik toko lain mengirim pesan ke NOMOR WHATSAPP YANG TERSAMBUNG KE BOT
+  (nomor bot). Bot mengenali mereka lewat nomor pengirim, mencatat ke toko
+  mereka, lalu membalas di chat yang sama. Perintah "saldo" dan "transaksi hari ini"
+  juga memakai data toko mereka sendiri.
+- Nomor yang tidak terdaftar diabaikan begitu saja (bot tidak membalas apa pun).
+
+LANGKAH
+-------
+1. Pemilik toko lain daftar akun sendiri di aplikasi ("Pertama kali? Buat akun pemilik"),
+   login minimal sekali, lalu menambah rekening (bank/e-wallet) di tokonya.
+   Nama rekening yang dia tulis di pesan WA harus sama dengan nama rekening di aplikasinya.
+2. Di Termux, buat file toko.json di folder bot (contoh: toko.json.contoh):
+     cd ~/wa-bot
+     cp toko.json.contoh toko.json
+     nano toko.json
+   Isi:
+   - "utama"  : email akun pemilik ANDA. WAJIB diisi begitu ada toko lain, supaya bot
+                tidak salah memilih toko utama.
+   - "toko"   : satu baris per toko lain: nama, nomor WhatsApp pemilik, email akunnya.
+   Simpan di nano: Ctrl+O, Enter, lalu Ctrl+X.
+   toko.json sengaja TIDAK ikut ke GitHub (berisi nomor dan email). Buat langsung di Termux.
+3. Jalankan ulang bot. Di layar harus muncul "Toko utama (dari toko.json)" dan
+   "Toko terdaftar: ..." untuk tiap toko. Baris "[PERINGATAN] ... dilewati" menjelaskan
+   toko yang gagal dibaca (misalnya email salah).
+4. Minta pemilik toko lain mengirim pesan ke nomor bot, misalnya:
+     saldo
+     tarik tunai 500rb bri admin 5000
+
+JIKA PESAN TIDAK DIBALAS
+------------------------
+Lihat layar Termux. Kalau muncul:
+  Pesan dari 1234567890@lid diabaikan ... tambahkan "lid": "1234567890" di toko.json
+maka WhatsApp mengirim ID tersamar, bukan nomor. Tambahkan baris "lid" itu ke toko yang
+bersangkutan di toko.json, simpan, lalu jalankan ulang bot. Contoh:
+  { "nama": "Toko Budi", "nomor": "081234567890", "email": "budi@gmail.com", "lid": "1234567890" }
+
+CATATAN
+-------
+- Pakai nomor WhatsApp kedua untuk bot (lihat PANDUAN-TERMUX.txt). Semua chat toko lain
+  akan muncul di WhatsApp nomor itu.
+- Anda memegang serviceAccountKey.json yang bisa membaca SEMUA toko di proyek Firebase.
+  Jaga file itu dan beri tahu pemilik toko lain bahwa Anda adalah pengelola sistemnya.
+- Toko lain yang dicatat lewat bot tidak akan bisa mengubah toko Anda, dan sebaliknya.
+
+NOMOR TAMBAHAN UNTUK TOKO ANDA SENDIRI
+--------------------------------------
+Nomor WhatsApp kedua milik Anda (atau karyawan) boleh mengirim pesan ke nomor bot dan
+dicatat ke toko UTAMA. Daftarkan di bagian "toko" dengan email yang SAMA dengan "utama":
+  { "nama": "Nomor 2 saya", "nomor": "081234567890", "email": "email-akun-anda@gmail.com" }
+
+HANYA NOMOR TERDAFTAR YANG DICATAT (HP BOT TIDAK IKUT)
+------------------------------------------------------
+Secara bawaan bot juga mencatat pesan yang diketik dari HP bot sendiri. Kalau Anda ingin
+hanya nomor yang terdaftar di "toko" yang boleh mencatat (misalnya nomor 2 Anda), tambahkan
+"pesanSendiri": false di bagian "utama" pada toko.json:
+  "utama": { "email": "email-akun-anda@gmail.com", "pesanSendiri": false }
+Lalu daftarkan nomor 2 Anda di bagian "toko" dengan email yang SAMA seperti "utama".
+Jalankan ulang bot. Di layar akan muncul "Pesan yang diketik dari HP bot ini DIABAIKAN".
+Hapus baris itu (atau ganti jadi true) kalau ingin HP bot ikut mencatat lagi.
+
+
+REKAP HARIAN OTOMATIS (opsional)
+--------------------------------
+Tambahkan "rekapJam" (jam 0-23) agar bot mengirim ringkasan tiap malam:
+  - Di bagian "utama": dikirim ke chat diri sendiri di nomor bot. Bawaan jam 23,
+    isi false untuk mematikan.
+  - Di tiap toko lain: dikirim ke nomor toko itu, hanya bila "rekapJam" diisi.
+Contoh:  { "nama": "Toko B", "nomor": "0812xxxxxxx", "email": "tokob@gmail.com", "rekapJam": 21 }
