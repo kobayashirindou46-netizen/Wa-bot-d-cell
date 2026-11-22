@@ -472,6 +472,45 @@ async function cekSaldo() {
   saldoBusy = false;
 }
 
+/* ---------- pemberitahuan tutup kas (kalau karyawan menutup kas di aplikasi) ---------- */
+var TUTUP_STATE = path.join(ROOT, 'tutup-state.json');
+var tutupBusy = false;
+function tutupText(nama, c) {
+  var jam = c.at ? new Date(c.at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }).replace('.', ':') : '';
+  var out = ['🔒 *Kas ditutup* (' + nama + ')', 'Oleh: ' + (c.by || 'karyawan') + (jam ? ' · pukul ' + jam : ''), 'Tanggal: ' + (c.date || '-'), ''];
+  var rows = Array.isArray(c.rows) ? c.rows : [], tot = 0;
+  rows.forEach(function (r) {
+    var d = (+r.nyata || 0) - (+r.buku || 0); tot += d;
+    out.push('• ' + (r.name || '-') + ': ' + rp(r.nyata) + (d ? ' (selisih ' + rpS(d) + ')' : ' (pas)'));
+  });
+  out.push('', tot ? '⚠️ Total selisih ' + rpS(tot) + '. Saldo di buku belum diubah.' : '✅ Semua pas dengan catatan buku.');
+  if (c.note) out.push('Catatan: ' + c.note);
+  return out.join('\n');
+}
+async function cekTutup() {
+  if (tutupBusy || !curSock || !curSock.user) return;
+  tutupBusy = true;
+  try {
+    var list = rekapTargets(), st = readJson(TUTUP_STATE), seen = {}, changed = false;
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i], key = t.sid + '|' + t.jid; if (seen[key]) continue; seen[key] = 1;
+      var snap = await db.doc(P(t.sid, 'settings/main')).get();
+      var cl = (snap.exists && Array.isArray(snap.data().closings)) ? snap.data().closings : [];
+      var last = cl.reduce(function (m, c) { return Math.max(m, +c.at || 0); }, 0);
+      if (st[key] === undefined) { st[key] = last; changed = true; continue; }   /* pertama kali: jadikan patokan, jangan kirim yang lama */
+      var fresh = cl.filter(function (c) { return (+c.at || 0) > st[key]; }).sort(function (a, b) { return (a.at || 0) - (b.at || 0); });
+      for (var j = 0; j < fresh.length; j++) {
+        if (fresh[j].byRole === 'owner') continue;   /* pemilik yang menutup sendiri tidak perlu diberi tahu */
+        await curSock.sendMessage(t.jid, { text: tutupText(t.nama, fresh[j]) });
+        console.log(new Date().toLocaleString('id-ID'), '- pemberitahuan tutup kas terkirim ke', t.nama);
+      }
+      if (last > st[key]) { st[key] = last; changed = true; }
+    }
+    if (changed) { try { fs.writeFileSync(TUTUP_STATE, JSON.stringify(st)); } catch (e) {} }
+  } catch (e) { console.error('[PERINGATAN] cek tutup kas gagal:', e && e.message ? e.message : e); }
+  tutupBusy = false;
+}
+
 /* ---------- cadangan data (otomatis tiap Minggu malam, atau ketik: cadangan) ---------- */
 var BACKUP_RE = /^(cadangan|backup)(\s+data)?\s*$/i;
 var BACKUP_STATE = path.join(ROOT, 'cadangan-state.json');
@@ -485,7 +524,7 @@ function txCsv(list, accs) {
   return '﻿' + head.join(',') + '\r\n' + rows.join('\r\n') + '\r\n';
 }
 async function buildBackup(sid) {
-  var cols = ['tx', 'acc', 'mv', 'debts', 'products'], out = { dibuat: new Date().toISOString(), shopId: sid, versi: 'bot-v23' };
+  var cols = ['tx', 'acc', 'mv', 'debts', 'products'], out = { dibuat: new Date().toISOString(), shopId: sid, versi: 'bot-v24' };
   for (var i = 0; i < cols.length; i++) {
     var sn = await db.collection(P(sid, cols[i])).get();
     out[cols[i]] = sn.docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
@@ -1062,7 +1101,7 @@ async function start() {
       }
     } else if (u.connection === 'open') {
       console.log('\n✅ Tersambung ke WhatsApp. Bot siap mencatat transaksi.\n');
-      if (!rekapTimer) { rekapTimer = setInterval(function () { cekRekap(); cekIngat(); }, 60000); setInterval(cekPendaftar, 120000); setInterval(cekSaldo, 600000); setInterval(cekCadangan, 900000); setInterval(cekLaporanBulan, 1800000); setTimeout(cekLaporanBulan, 70000); setTimeout(cekSaldo, 45000); setTimeout(cekRekap, 15000); setTimeout(cekIngat, 25000); setTimeout(ensureAdmin, 5000); setTimeout(cekPendaftar, 35000); }
+      if (!rekapTimer) { rekapTimer = setInterval(function () { cekRekap(); cekIngat(); }, 60000); setInterval(cekPendaftar, 120000); setInterval(cekSaldo, 600000); setInterval(cekTutup, 60000); setTimeout(cekTutup, 20000); setInterval(cekCadangan, 900000); setInterval(cekLaporanBulan, 1800000); setTimeout(cekLaporanBulan, 70000); setTimeout(cekSaldo, 45000); setTimeout(cekRekap, 15000); setTimeout(cekIngat, 25000); setTimeout(ensureAdmin, 5000); setTimeout(cekPendaftar, 35000); }
     }
   });
 
@@ -1243,7 +1282,7 @@ async function handleMessage(sock, msg) {
   var text = (m && (m.conversation || (m.extendedTextMessage && m.extendedTextMessage.text))) || '';
   text = text.trim();
   if (!text) return;
-  if (/^(🌙|💰|📊|✅|⚠️|🗑️|🛠️|📦|👤)/.test(text)) return;   /* balasan/rekap dari bot sendiri, jangan dibaca sebagai transaksi */
+  if (/^(🌙|💰|📊|✅|⚠️|🗑️|🛠️|📦|👤|🔒)/.test(text)) return;   /* balasan/rekap dari bot sendiri, jangan dibaca sebagai transaksi */
   var tag = toko ? '[' + toko.nama + '] ' : '';
 
   if (SALDO_RE.test(text)) {

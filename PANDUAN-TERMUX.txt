@@ -434,3 +434,12 @@ Perintah baru:  tempo budi 7
   Hanya untuk catatan yang belum lunas. Kalau ada dua catatan dengan nama mirip, tulis nama lebih lengkap.
 Cicilan tetap dicatat dengan:  bayar piutang budi 75rb   (sisa otomatis berkurang, tempo tidak berubah)
 
+
+UPDATE bot v24: PEMBERITAHUAN TUTUP KAS
+---------------------------------------
+Kalau KARYAWAN menutup kas di aplikasi, bot otomatis mengirim pesan ke WhatsApp pemilik (dalam 1 menit):
+  siapa yang menutup, jam berapa, uang tiap rekening, selisih dengan buku, dan catatannya.
+Kalau PEMILIK menutup kas sendiri, tidak ada pemberitahuan. Pesan lama tidak dikirim ulang.
+Tidak perlu mengubah toko.json. Cara pasang sama seperti update biasa (bash update.sh lalu bash start.sh).
+Syarat: aplikasi Buku Kas sudah v178 ke atas.
+
